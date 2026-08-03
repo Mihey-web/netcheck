@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><title>netcheck — вариант A «каскад»</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+@font-face{font-family:'SE';src:url(space_engineers.ttf) format('truetype');font-display:swap}
+:root{
+ --void:#04070c;
+ --panel:rgba(7,12,19,.88); --surface:#0b1119; --surface-2:#131c27;
+ --line:#1a2634; --line-2:#243447;
+ --hud:#5fd9f5; --hud-dim:#2b6a80;
+ --ink:#e9f4fb; --ink-2:#9db1c4; --muted:#63788c;
+ --good:#3ad684; --warn:#ffc233; --serious:#ff8a4c; --crit:#ff4d5e;
+ --mono:"Cascadia Mono",Consolas,ui-monospace,SFMono-Regular,monospace;
+ --hudfont:'SE',Bahnschrift,"Segoe UI Semibold","Segoe UI",system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;min-width:720px;color:var(--ink);
+ font-family:"Segoe UI",system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased;
+ background:
+  radial-gradient(90% 70% at 70% -10%,rgba(23,52,74,.55),rgba(4,7,12,0) 60%),
+  radial-gradient(70% 55% at 15% 110%,rgba(43,106,128,.22),rgba(4,7,12,0) 62%),
+  linear-gradient(180deg,#060b12,var(--void) 55%);
+ display:flex;flex-direction:column;height:100vh;overflow:hidden}
+
+/* оверлеи HUD */
+.scanlines{position:fixed;inset:0;pointer-events:none;z-index:60;opacity:.5;
+ background:repeating-linear-gradient(rgba(120,200,230,.035) 0 1px,rgba(0,0,0,0) 1px 3px)}
+.vign{position:fixed;inset:0;pointer-events:none;z-index:59;
+ background:radial-gradient(120% 90% at 50% 50%,rgba(0,0,0,0) 55%,rgba(0,0,0,.55) 100%)}
+
+/* ——— панель-заготовка ——— */
+.pan{position:relative;background:var(--panel);border:1px solid var(--line);
+ clip-path:polygon(0 0,calc(100% - 11px) 0,100% 11px,100% 100%,11px 100%,0 calc(100% - 11px))}
+.pan>h3{margin:0;display:flex;align-items:center;gap:7px;
+ font-family:var(--hudfont);font-weight:400;font-size:11.5px;letter-spacing:.16em;
+ color:var(--hud);text-transform:uppercase;padding:7px 11px 6px;border-bottom:1px solid var(--line);
+ background:linear-gradient(90deg,rgba(95,217,245,.10),rgba(95,217,245,0))}
+.pan>h3 .hx{margin-left:auto;font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;color:var(--hud-dim);text-transform:none}
+.pan .bd{padding:9px 11px 11px}
+
+/* ——— шапка ——— */
+.top{flex:none;display:flex;align-items:center;gap:16px;padding:9px 16px 8px;position:relative;z-index:1;
+ border-bottom:1px solid var(--line-2);background:linear-gradient(180deg,rgba(10,17,26,.95),rgba(8,13,20,.78));
+ box-shadow:0 1px 0 rgba(95,217,245,.10),0 10px 26px -18px #000}
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.brand .mark{width:26px;height:26px;flex:none;border:1px solid var(--hud);border-radius:50%;position:relative;
+ box-shadow:0 0 12px rgba(95,217,245,.28) inset,0 0 8px rgba(95,217,245,.16)}
+.brand .mark::before{content:'';position:absolute;inset:5px;border-radius:50%;border:1px solid rgba(95,217,245,.45)}
+.brand .mark::after{content:'';position:absolute;left:50%;top:50%;width:9px;height:1px;background:var(--hud);
+ transform-origin:0 50%;transform:rotate(-38deg)}
+.brand b{font-family:var(--hudfont);font-weight:400;font-size:18px;letter-spacing:.19em;line-height:1;color:var(--ink)}
+.brand .sub{font-family:var(--mono);font-size:10px;color:var(--muted);letter-spacing:.06em;white-space:nowrap}
+.runbtn{appearance:none;border:1px solid rgba(95,217,245,.55);cursor:pointer;margin-left:14px;
+ font-family:var(--hudfont);font-size:13px;letter-spacing:.2em;text-transform:uppercase;
+ color:#03212b;background:linear-gradient(180deg,#8ee9ff,#42c3e2);
+ padding:9px 26px 8px;box-shadow:0 0 18px rgba(95,217,245,.35);
+ clip-path:polygon(0 0,calc(100% - 9px) 0,100% 9px,100% 100%,9px 100%,0 calc(100% - 9px))}
+.runbtn:hover{background:linear-gradient(180deg,#a5efff,#5fd9f5);box-shadow:0 0 26px rgba(95,217,245,.5)}
+.runmeta{display:flex;flex-direction:column;gap:2px;font-family:var(--mono);font-size:10px;color:var(--muted);line-height:1.3}
+.runmeta b{font-weight:400;color:var(--ink-2)}
+.top .right{margin-left:auto;display:flex;align-items:center;gap:9px}
+.langsw{display:flex;border:1px solid var(--line-2);background:rgba(4,8,13,.7)}
+.langsw span{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;padding:4px 9px 3px;color:var(--muted);cursor:pointer}
+.langsw span:hover{color:var(--ink)}
+.langsw span.on{color:#03212b;background:linear-gradient(180deg,#8ee9ff,#42c3e2)}
+.gear{width:26px;height:26px;display:flex;align-items:center;justify-content:center;cursor:pointer;
+ border:1px solid var(--line-2);color:var(--ink-2);background:rgba(4,8,13,.7)}
+.gear:hover{color:var(--hud);border-color:var(--hud-dim)}
+.gear svg{width:15px;height:15px;display:block}
+
+/* ——— вердикт ——— */
+main{flex:1 1 auto;min-height:0;position:relative;z-index:1;display:flex;flex-direction:column;gap:10px;padding:10px 14px 12px;overflow:hidden}
+.verdict{flex:none;position:relative;border:1px solid rgba(255,194,51,.4);background:linear-gradient(90deg,rgba(255,194,51,.10),rgba(255,138,76,.05) 55%,rgba(7,12,19,.88));
+ clip-path:polygon(0 0,calc(100% - 11px) 0,100% 11px,100% 100%,11px 100%,0 calc(100% - 11px));
+ display:flex;gap:13px;padding:10px 14px 11px;align-items:flex-start}
+.verdict .sig{flex:none;width:44px;display:flex;flex-direction:column;align-items:center;gap:4px;padding-top:2px}
+.verdict .sig .lamp{width:26px;height:26px;border-radius:50%;background:radial-gradient(circle at 38% 34%,#ffe28a,var(--warn) 60%,#9a6d00);
+ box-shadow:0 0 16px rgba(255,194,51,.55),0 0 2px rgba(255,194,51,.9)}
+.verdict .sig .cap{font-family:var(--hudfont);font-size:9px;letter-spacing:.14em;color:var(--warn);text-transform:uppercase}
+.verdict h2{margin:0 0 4px;font-family:var(--hudfont);font-weight:400;font-size:15px;letter-spacing:.12em;text-transform:uppercase;color:var(--warn)}
+.verdict p{margin:0;font-size:12.5px;line-height:1.5;color:var(--ink);max-width:72ch}
+.verdict p b{color:var(--warn);font-weight:600}
+.verdict p .ok{color:var(--good)}
+.verdict p .bad{color:var(--crit)}
+.verdict .att{margin-top:5px;font-size:11.5px;color:var(--serious);display:flex;gap:6px;align-items:baseline}
+.verdict .att::before{content:'⚠';flex:none}
+
+/* ——— каркас: каскад + история ——— */
+.cols{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) clamp(210px,24vw,262px);gap:10px}
+.flow{min-height:0;overflow-y:auto;overflow-x:hidden;padding-right:4px;scrollbar-width:thin;scrollbar-color:#22384a transparent;
+ display:flex;flex-direction:column}
+.flow::-webkit-scrollbar{width:7px}
+.flow::-webkit-scrollbar-thumb{background:#22384a}
+
+/* окружение */
+.env .bd{display:flex;flex-wrap:wrap;gap:5px}
+.chip{font-family:var(--mono);font-size:10.5px;padding:3px 8px;border:1px solid var(--line-2);
+ background:rgba(255,255,255,.025);color:var(--ink-2);display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.chip .k{color:var(--muted)}
+.chip .led{width:6px;height:6px;border-radius:50%;flex:none}
+.led.g{background:var(--good);box-shadow:0 0 6px rgba(58,214,132,.7)}
+.led.w{background:var(--warn);box-shadow:0 0 6px rgba(255,194,51,.7)}
+.led.r{background:var(--crit);box-shadow:0 0 6px rgba(255,77,94,.7)}
+.led.o{background:#2c3b4c}
+.chip.warned{border-color:rgba(255,194,51,.5);color:var(--warn)}
+
+/* ——— каскад слоёв ——— */
+.cascade{display:flex;flex-direction:column;margin-top:10px}
+.stage{position:relative;display:grid;grid-template-columns:46px minmax(0,1fr);gap:0 10px}
+.rail{position:relative;display:flex;justify-content:center}
+.rail .node{position:relative;z-index:2;width:30px;height:30px;margin-top:8px;flex:none;
+ border:1px solid;display:flex;align-items:center;justify-content:center;background:var(--surface);
+ clip-path:polygon(0 0,calc(100% - 7px) 0,100% 7px,100% 100%,7px 100%,0 calc(100% - 7px))}
+.rail .node i{width:10px;height:10px;border-radius:50%}
+.stage.ok .node{border-color:var(--good)}
+.stage.ok .node i{background:var(--good);box-shadow:0 0 8px rgba(58,214,132,.8)}
+.stage.warn .node{border-color:var(--warn)}
+.stage.warn .node i{background:var(--warn);box-shadow:0 0 8px rgba(255,194,51,.8)}
+.stage.crit .node{border-color:var(--crit)}
+.stage.crit .node i{background:var(--crit);box-shadow:0 0 9px rgba(255,77,94,.85)}
+.rail::before{content:'';position:absolute;top:38px;bottom:-9px;left:50%;width:0;
+ border-left:1px solid var(--line-2)}
+.rail::after{content:'';position:absolute;bottom:-9px;left:50%;transform:translateX(-50%) rotate(45deg);
+ width:5px;height:5px;border-right:1px solid var(--line-2);border-bottom:1px solid var(--line-2)}
+.stage:last-child .rail::before,.stage:last-child .rail::after{display:none}
+.stage .card{margin-bottom:9px;background:var(--panel);border:1px solid var(--line);
+ clip-path:polygon(0 0,calc(100% - 10px) 0,100% 10px,100% 100%,10px 100%,0 calc(100% - 10px))}
+.stage .card:hover{border-color:#3f6c86;background:rgba(18,29,41,.94)}
+.stage.warn .card{border-color:rgba(255,194,51,.35)}
+.stage.crit .card{border-color:rgba(255,77,94,.4)}
+.shead{display:flex;align-items:baseline;gap:10px;padding:7px 11px 6px}
+.shead .nm{font-family:var(--hudfont);font-size:12.5px;letter-spacing:.13em;text-transform:uppercase;color:var(--ink)}
+.shead .st{font-family:var(--mono);font-size:10px;letter-spacing:.1em;padding:1px 7px;border:1px solid currentColor;text-transform:uppercase}
+.stage.ok .st{color:var(--good)}
+.stage.warn .st{color:var(--warn)}
+.stage.crit .st{color:var(--crit)}
+.shead .ms{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.sbody{padding:0 11px 8px;font-size:11.5px;color:var(--ink-2);line-height:1.45}
+.sbody .probe{display:inline-flex;align-items:center;gap:5px;margin-right:14px;font-family:var(--mono);font-size:11px;white-space:nowrap}
+.sbody .probe b{font-weight:400;color:var(--ink)}
+.sbody .probe .ms{color:var(--muted)}
+.snote{padding:0 11px 9px;font-size:11px;color:var(--warn);line-height:1.4}
+.snote code{font-family:var(--mono);font-size:10.5px;color:var(--ink-2);background:rgba(255,255,255,.05);padding:0 4px}
+
+/* блокируемые сервисы */
+.svc{display:grid;grid-template-columns:minmax(90px,1fr) minmax(0,1.5fr) minmax(0,1.1fr);gap:0;
+ font-size:11px;border-top:1px solid #141d28;align-items:center}
+.svc.hd{border-top:0;color:var(--muted);font-size:9.5px;letter-spacing:.1em;text-transform:uppercase}
+.svc>div{padding:5px 8px;min-width:0}
+.svc .dom{font-family:var(--mono);font-size:11.5px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.svcwrap{padding:0 11px 10px}
+.res{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10.5px;white-space:nowrap}
+.res .led{width:7px;height:7px;border-radius:50%;flex:none}
+.res em{font-style:normal;color:var(--muted)}
+.res.f{color:var(--crit)}
+.res.p{color:var(--good)}
+.svc.dead{background:rgba(255,77,94,.07)}
+
+/* ——— спойлер детальной таблицы ——— */
+details.det{margin-top:1px}
+details.det>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:8px;
+ font-family:var(--hudfont);font-size:11px;letter-spacing:.15em;text-transform:uppercase;color:var(--hud-dim);
+ padding:7px 11px;border:1px dashed var(--line-2);background:rgba(6,10,16,.6)}
+details.det>summary::-webkit-details-marker{display:none}
+details.det>summary:hover{color:var(--hud);border-color:var(--hud-dim)}
+details.det>summary .tri{display:inline-block;transition:transform .15s;font-size:9px}
+details.det[open]>summary .tri{transform:rotate(90deg)}
+details.det>summary .cnt{margin-left:auto;font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:none}
+.dtbl{width:100%;border-collapse:collapse;font-size:11px;margin-top:6px;background:var(--panel);border:1px solid var(--line)}
+.dtbl th{text-align:left;color:var(--hud);font-family:var(--hudfont);font-weight:400;font-size:9.5px;
+ letter-spacing:.13em;text-transform:uppercase;padding:6px 9px;border-bottom:1px solid var(--line-2);
+ background:linear-gradient(90deg,rgba(95,217,245,.07),rgba(95,217,245,0))}
+.dtbl td{padding:4.5px 9px;border-bottom:1px solid #10171f;font-family:var(--mono);font-size:10.5px;color:var(--ink-2);white-space:nowrap}
+.dtbl tr:last-child td{border-bottom:0}
+.dtbl tr:hover td{background:rgba(95,217,245,.05)}
+.dtbl td.tgt{color:var(--ink)}
+.dtbl td.num{text-align:right;font-variant-numeric:tabular-nums}
+.dtbl .ok{color:var(--good)}
+.dtbl .fail{color:var(--crit)}
+.dtbl .warn{color:var(--warn)}
+.path{font-size:9.5px;padding:0 5px;border:1px solid var(--line-2);color:var(--muted)}
+.path.vpn{color:var(--hud);border-color:var(--hud-dim)}
+
+/* ——— история ——— */
+.hist{min-height:0;display:flex;flex-direction:column}
+.hist .bd{padding:6px;overflow-y:auto;min-height:0;display:flex;flex-direction:column;gap:4px;
+ scrollbar-width:thin;scrollbar-color:#22384a transparent}
+.run{display:flex;gap:8px;align-items:flex-start;padding:6px 8px;background:rgba(255,255,255,.02);
+ border-left:2px solid var(--muted);cursor:pointer}
+.run:hover{background:rgba(95,217,245,.08)}
+.run.warn{border-left-color:var(--warn)}
+.run.good{border-left-color:var(--good)}
+.run.crit{border-left-color:var(--crit)}
+.run.now{background:rgba(95,217,245,.10);box-shadow:inset 0 0 0 1px rgba(95,217,245,.35)}
+.run .led{margin-top:3px;flex:none;width:8px;height:8px;border-radius:50%}
+.run .tx{min-width:0;flex:1}
+.run .tm{display:flex;align-items:baseline;gap:8px;font-family:var(--mono);font-size:10.5px;color:var(--ink)}
+.run .tm em{font-style:normal;margin-left:auto;color:var(--muted);font-size:9.5px}
+.run .sum{font-size:10.5px;color:var(--ink-2);line-height:1.35;margin-top:1px;
+ overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.run.now .tm em{color:var(--hud)}
+
+/* нижняя строка состояния */
+.ticker{flex:none;height:24px;border-top:1px solid var(--line-2);background:rgba(6,10,16,.8);
+ position:relative;z-index:1;display:flex;align-items:center;overflow:hidden}
+.ticker .tag{flex:none;font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;color:#03212b;
+ background:var(--warn);padding:4px 9px 3px;margin-right:10px}
+.ticker .tx{white-space:nowrap;font-family:var(--mono);font-size:10.5px;color:var(--ink-2);letter-spacing:.04em}
+.ticker .tx i{color:var(--hud-dim);font-style:normal;margin:0 10px}
+.ticker .tx em{font-style:normal;color:var(--warn)}
+</style></head>
+<body>
+<div class="vign"></div><div class="scanlines"></div>
+
+<!-- ——— шапка ——— -->
+<header class="top">
+  <div class="brand">
+    <span class="mark"></span>
+    <div>
+      <b>NETCHECK</b>
+      <div class="sub">диагностика сети · v0.3.1</div>
+    </div>
+  </div>
+  <button class="runbtn" type="button">▶&nbsp;Проверить</button>
+  <div class="runmeta">
+    <span>последний прогон: <b>сегодня 21:37</b></span>
+    <span>длительность: <b>12.4 с</b> · тестов: <b>23</b></span>
+  </div>
+  <div class="right">
+    <div class="langsw"><span class="on">RU</span><span>EN</span></div>
+    <div class="gear" title="Настройки">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
+        <circle cx="12" cy="12" r="3.2"/>
+        <path d="M12 2.8v3M12 18.2v3M2.8 12h3M18.2 12h3M5.5 5.5l2.1 2.1M16.4 16.4l2.1 2.1M18.5 5.5l-2.1 2.1M7.6 16.4l-2.1 2.1"/>
+      </svg>
+    </div>
+  </div>
+</header>
+
+<main>
+  <!-- ——— вердикт ——— -->
+  <section class="verdict">
+    <div class="sig"><span class="lamp"></span><span class="cap">Warn</span></div>
+    <div>
+      <h2>Интернет работает — есть блокировки</h2>
+      <p>Провайдер блокирует <b>YouTube</b> (DPI по SNI), <b>Discord</b> (по IP) и <b>Instagram</b> (подмена DNS) —
+        через VPN они <span class="ok">доступны</span>. <b>X</b> <span class="bad">не работает даже через VPN</span> —
+        проблема на стороне VPN-сервера.</p>
+      <div class="att">Системный прокси выключен — браузер сейчас ходит <b>МИМО</b> VPN.</div>
+    </div>
+  </section>
+
+  <div class="cols">
+    <!-- ——— левая колонка: окружение + каскад ——— -->
+    <div class="flow">
+
+      <section class="pan env">
+        <h3>Окружение <span class="hx">снимок 21:37:04</span></h3>
+        <div class="bd">
+          <span class="chip"><span class="k">Wi-Fi</span> TP-Link_5G</span>
+          <span class="chip"><span class="k">шлюз</span> 192.168.0.1</span>
+          <span class="chip"><span class="k">IP</span> 192.168.0.42</span>
+          <span class="chip"><span class="led g"></span> v2rayN-прокси 127.0.0.1:10808 — активен</span>
+          <span class="chip warned"><span class="led w"></span> системный прокси Windows — выкл</span>
+          <span class="chip"><span class="led o"></span> WireGuard-адаптер — нет</span>
+          <span class="chip"><span class="led g"></span> Tailscale — подключён, без exit-node</span>
+        </div>
+      </section>
+
+      <!-- каскад -->
+      <div class="cascade">
+
+        <div class="stage ok">
+          <div class="rail"><span class="node"><i></i></span></div>
+          <div class="card">
+            <div class="shead"><span class="nm">Шлюз</span><span class="st">OK</span><span class="ms">1 мс</span></div>
+            <div class="sbody"><span class="probe">ping 192.168.0.1 <b>OK</b> <span class="ms">1 мс</span></span> роутер отвечает, локальная сеть в норме</div>
+          </div>
+        </div>
+
+        <div class="stage warn">
+          <div class="rail"><span class="node"><i></i></span></div>
+          <div class="card">
+            <div class="shead"><span class="nm">DNS</span><span class="st">Warn</span><span class="ms">37 мс</span></div>
+            <div class="sbody">провайдер подменяет ответы: системный DNS и DoH расходятся</div>
+            <div class="snote">youtube.com → системный: <code>172.64.66.1 (заглушка)</code> · DoH: <code>142.250.74.78</code></div>
+          </div>
+        </div>
+
+        <div class="stage ok">
+          <div class="rail"><span class="node"><i></i></span></div>
+          <div class="card">
+            <div class="shead"><span class="nm">Рунет</span><span class="st">OK</span><span class="ms">6 мс</span></div>
+            <div class="sbody">
+              <span class="probe">ya.ru <b>OK</b> <span class="ms">4 мс</span></span>
+              <span class="probe">vk.com <b>OK</b> <span class="ms">6 мс</span></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage ok">
+          <div class="rail"><span class="node"><i></i></span></div>
+          <div class="card">
+            <div class="shead"><span class="nm">Заграница</span><span class="st">OK</span><span class="ms">48 мс</span></div>
+            <div class="sbody">
+              <span class="probe">1.1.1.1 <b>OK</b> <span class="ms">48 мс</span></span>
+              <span class="probe">wikipedia.org <b>OK</b> <span class="ms">61 мс</span></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage crit">
+          <div class="rail"><span class="node"><i></i></span></div>
+          <div class="card">
+            <div class="shead"><span class="nm">Блокируемые сервисы</span><span class="st">Problem</span><span class="ms">3 из 4 блокированы</span></div>
+            <div class="svcwrap">
+              <div class="svc hd"><div>Сервис</div><div>Напрямую</div><div>Через прокси</div></div>
+              <div class="svc">
+                <div class="dom">youtube.com</div>
+                <div><span class="res f"><span class="led r"></span>FAIL <em>· DPI по SNI</em></span></div>
+                <div><span class="res p"><span class="led g"></span>OK <em>· 214 мс</em></span></div>
+              </div>
+              <div class="svc">
+                <div class="dom">discord.com</div>
+                <div><span class="res f"><span class="led r"></span>FAIL <em>· блок по IP</em></span></div>
+                <div><span class="res p"><span class="led g"></span>OK <em>· 198 мс</em></span></div>
+              </div>
+              <div class="svc">
+                <div class="dom">instagram.com</div>
+                <div><span class="res f"><span class="led r"></span>FAIL <em>· DNS-заглушка</em></span></div>
+                <div><span class="res p"><span class="led g"></span>OK <em>· 231 мс</em></span></div>
+              </div>
+              <div class="svc dead">
+                <div class="dom">x.com</div>
+                <div><span class="res f"><span class="led r"></span>FAIL <em>· DPI по SNI</em></span></div>
+                <div><span class="res f"><span class="led r"></span>FAIL <em>· таймаут</em></span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ——— спойлер: детальная таблица ——— -->
+      <details class="det">
+        <summary><span class="tri">▶</span> Детальная таблица тестов <span class="cnt">23 теста · 12.4 с</span></summary>
+        <table class="dtbl">
+          <thead><tr><th>Цель</th><th>Метод</th><th>Путь</th><th style="text-align:right">Время</th><th>Результат</th></tr></thead>
+          <tbody>
+            <tr><td class="tgt">192.168.0.1</td><td>ping</td><td><span class="path">напрямую</span></td><td class="num">1 мс</td><td class="ok">OK</td></tr>
+            <tr><td class="tgt">youtube.com</td><td>DNS</td><td><span class="path">напрямую</span></td><td class="num">37 мс</td><td class="warn">ПОДМЕНА · 172.64.66.1</td></tr>
+            <tr><td class="tgt">youtube.com</td><td>DNS (DoH)</td><td><span class="path">напрямую</span></td><td class="num">52 мс</td><td class="ok">OK · 142.250.74.78</td></tr>
+            <tr><td class="tgt">ya.ru</td><td>ping</td><td><span class="path">напрямую</span></td><td class="num">4 мс</td><td class="ok">OK</td></tr>
+            <tr><td class="tgt">ya.ru</td><td>TCP:443</td><td><span class="path">напрямую</span></td><td class="num">5 мс</td><td class="ok">OK</td></tr>
+            <tr><td class="tgt">vk.com</td><td>HTTP</td><td><span class="path">напрямую</span></td><td class="num">6 мс</td><td class="ok">OK · 200</td></tr>
+            <tr><td class="tgt">1.1.1.1</td><td>ping</td><td><span class="path">напрямую</span></td><td class="num">48 мс</td><td class="ok">OK</td></tr>
+            <tr><td class="tgt">wikipedia.org</td><td>TLS-SNI</td><td><span class="path">напрямую</span></td><td class="num">61 мс</td><td class="ok">OK</td></tr>
+            <tr><td class="tgt">wikipedia.org</td><td>HTTP</td><td><span class="path">напрямую</span></td><td class="num">74 мс</td><td class="ok">OK · 200</td></tr>
+            <tr><td class="tgt">youtube.com</td><td>TCP:443</td><td><span class="path">напрямую</span></td><td class="num">49 мс</td><td class="ok">OK</td></tr>
+            <tr><td class="tgt">youtube.com</td><td>TLS-SNI</td><td><span class="path">напрямую</span></td><td class="num">5 002 мс</td><td class="fail">FAIL · reset после ClientHello</td></tr>
+            <tr><td class="tgt">youtube.com</td><td>TLS-SNI</td><td><span class="path vpn">прокси</span></td><td class="num">214 мс</td><td class="ok">OK</td></tr>
+            <tr><td class="tgt">discord.com</td><td>TCP:443</td><td><span class="path">напрямую</span></td><td class="num">3 008 мс</td><td class="fail">FAIL · таймаут SYN</td></tr>
+            <tr><td class="tgt">discord.com</td><td>TCP:443</td><td><span class="path vpn">прокси</span></td><td class="num">198 мс</td><td class="ok">OK</td></tr>
+            <tr><td class="tgt">instagram.com</td><td>DNS</td><td><span class="path">напрямую</span></td><td class="num">31 мс</td><td class="fail">FAIL · заглушка 172.64.66.1</td></tr>
+            <tr><td class="tgt">instagram.com</td><td>HTTP</td><td><span class="path vpn">прокси</span></td><td class="num">231 мс</td><td class="ok">OK · 200</td></tr>
+            <tr><td class="tgt">x.com</td><td>TCP:443</td><td><span class="path">напрямую</span></td><td class="num">52 мс</td><td class="ok">OK</td></tr>
+            <tr><td class="tgt">x.com</td><td>TLS-SNI</td><td><span class="path">напрямую</span></td><td class="num">5 003 мс</td><td class="fail">FAIL · reset после ClientHello</td></tr>
+            <tr><td class="tgt">x.com</td><td>TCP:443</td><td><span class="path vpn">прокси</span></td><td class="num">5 001 мс</td><td class="fail">FAIL · таймаут</td></tr>
+            <tr><td class="tgt">x.com</td><td>TLS-SNI</td><td><span class="path vpn">прокси</span></td><td class="num">5 004 мс</td><td class="fail">FAIL · таймаут</td></tr>
+          </tbody>
+        </table>
+      </details>
+    </div>
+
+    <!-- ——— правая колонка: история ——— -->
+    <aside class="pan hist">
+      <h3>История прогонов <span class="hx">хранится 30 дней</span></h3>
+      <div class="bd">
+        <div class="run warn now">
+          <span class="led w"></span>
+          <div class="tx">
+            <div class="tm">сегодня 21:37 <em>текущий</em></div>
+            <div class="sum">Блокировки: YouTube, Discord, Instagram; x.com мёртв даже через VPN</div>
+          </div>
+        </div>
+        <div class="run warn">
+          <span class="led w"></span>
+          <div class="tx">
+            <div class="tm">сегодня 18:02</div>
+            <div class="sum">Блокировки: YouTube, Discord; VPN обходит всё</div>
+          </div>
+        </div>
+        <div class="run good">
+          <span class="led g"></span>
+          <div class="tx">
+            <div class="tm">сегодня 09:15</div>
+            <div class="sum">Всё в норме, VPN активен, задержка за границу 44 мс</div>
+          </div>
+        </div>
+        <div class="run crit">
+          <span class="led r"></span>
+          <div class="tx">
+            <div class="tm">вчера 23:48</div>
+            <div class="sum">Нет интернета: шлюз отвечает, дальше — тишина (авария провайдера)</div>
+          </div>
+        </div>
+        <div class="run warn">
+          <span class="led w"></span>
+          <div class="tx">
+            <div class="tm">вчера 20:31</div>
+            <div class="sum">DNS-подмена + блок YouTube; системный прокси был выключен</div>
+          </div>
+        </div>
+        <div class="run good">
+          <span class="led g"></span>
+          <div class="tx">
+            <div class="tm">30.07 14:22</div>
+            <div class="sum">Всё в норме; без VPN, блокируемые не проверялись</div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<footer class="ticker">
+  <span class="tag">ИТОГ</span>
+  <span class="tx">прогон 21:37 завершён за 12.4 с<i>|</i>23 теста · 18 OK · 1 warn · 4 fail<i>|</i><em>3 сервиса блокированы провайдером</em><i>|</i>x.com недоступен и через VPN<i>|</i>системный прокси Windows — выкл</span>
+</footer>
+
+<script>
+// мокап: минимум поведения — только декоративные переключатели
+document.querySelectorAll('.langsw span').forEach(el=>{
+  el.addEventListener('click',()=>{
+    document.querySelectorAll('.langsw span').forEach(x=>x.classList.remove('on'));
+    el.classList.add('on');
+  });
+});
+</script>
+</body></html>

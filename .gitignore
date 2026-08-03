@@ -1,0 +1,11 @@
+# proprietary game asset used only for local mockups — never ship it
+mockups/space_engineers.ttf
+
+# build output
+build/bin/
+node_modules/
+*.exe
+
+# frontend build artifacts; the directory itself must stay for //go:embed
+frontend/dist/*
+!frontend/dist/.gitkeep

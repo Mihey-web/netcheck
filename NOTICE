@@ -1,0 +1,44 @@
+netcheck
+Copyright (C) 2026 Михей Коваленко
+
+Программа распространяется под GNU AGPL-3.0 — см. LICENSE.
+
+Ниже перечислено чужое, что входит в сборку или используется при её
+подготовке, вместе с требуемыми указаниями авторства.
+
+────────────────────────────────────────────────────────────────────────
+Встроенные данные
+────────────────────────────────────────────────────────────────────────
+
+internal/geo/data/ip.bin.gz — офлайн-справочник «IPv4 → страна, автономная
+система». Собран командой cmd/geogen из двух баз:
+
+    IP Geolocation by DB-IP (https://db-ip.com)
+    · DB-IP IP-to-Country Lite, выпуск 2026-08
+    · DB-IP ASN Lite, выпуск 2026-08
+    Лицензия: Creative Commons Attribution 4.0 International (CC BY 4.0)
+    https://creativecommons.org/licenses/by/4.0/
+
+Формат изменён (данные перепакованы в компактный вид, оставлены только код
+страны, номер AS и её название; покрытие сокращено до IPv4) — CC BY 4.0 это
+разрешает при сохранении указания авторства, которое приведено здесь и
+показывается в самой программе на вкладке карты.
+
+frontend/src/data/countries-110m.json, land-110m.json — контуры стран
+из Natural Earth (https://www.naturalearthdata.com), общественное достояние.
+
+frontend/src/assets/fonts/nunito-v16-latin-regular.woff2 — шрифт Nunito,
+SIL Open Font License 1.1, текст лицензии в том же каталоге (OFL.txt).
+
+────────────────────────────────────────────────────────────────────────
+Библиотеки
+────────────────────────────────────────────────────────────────────────
+
+github.com/wailsapp/wails/v2 — MIT
+golang.org/x/net, golang.org/x/sys — BSD-3-Clause
+gopkg.in/yaml.v3 — MIT и Apache-2.0
+github.com/oschwald/maxminddb-golang/v2 — ISC
+    Используется только генератором cmd/geogen при обновлении данных;
+    в netcheck.exe не входит.
+
+Полный список с версиями — в go.mod и go.sum.

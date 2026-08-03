@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>netcheck</title>
+</head>
+<body>
+
+<div class="scanlines"></div>
+
+<!-- ═══ шапка ═══ -->
+<header class="top">
+    <div class="brand">
+        <b>netcheck</b>
+        <span class="sub" id="subline"></span>
+    </div>
+    <div class="sp"></div>
+    <div class="seg" id="tabs">
+        <button id="tab-report" class="on" data-i18n="tab.report">Отчёт</button>
+        <button id="tab-services" data-i18n="tab.services">Сервисы</button>
+        <button id="tab-map" data-i18n="tab.map">Карта</button>
+    </div>
+    <button class="gear" id="gear" data-i18n-title="gear.title" title="Настройки">
+        <svg viewBox="0 0 24 24"><path d="M19.4 13c.04-.32.06-.65.06-1s-.02-.68-.06-1l2.1-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.6-.22l-2.49 1a7.3 7.3 0 0 0-1.73-1l-.38-2.65A.5.5 0 0 0 13.93 2h-4a.5.5 0 0 0-.5.42l-.37 2.65c-.63.26-1.2.6-1.74 1l-2.48-1a.5.5 0 0 0-.61.22l-2 3.46a.5.5 0 0 0 .12.64L4.46 11c-.04.32-.06.65-.06 1s.02.68.06 1l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46c.14.24.42.34.61.22l2.48-1c.54.4 1.12.74 1.75 1l.37 2.65a.5.5 0 0 0 .5.42h4a.5.5 0 0 0 .49-.42l.38-2.65a7.2 7.2 0 0 0 1.74-1l2.48 1c.23.09.5 0 .61-.22l2-3.46a.5.5 0 0 0-.12-.64L19.4 13Zm-7.47 2.6a3.6 3.6 0 1 1 0-7.2 3.6 3.6 0 0 1 0 7.2Z"/></svg>
+    </button>
+</header>
+
+<main id="view-report">
+    <!-- ═══ левая колонка ═══ -->
+    <div class="col">
+
+        <button class="runbtn" id="btn-run">
+            <span id="btn-label" data-i18n="btn.run">Проверить</span>
+            <small id="btn-sub">—</small>
+        </button>
+
+        <section class="pan">
+            <h3><span data-i18n="panel.env">Окружение</span><span class="hx">ENV</span></h3>
+            <div class="bd" id="env-body"></div>
+        </section>
+
+        <section class="pan hist">
+            <h3><span data-i18n="panel.history">История прогонов</span><span class="hx">LOG</span></h3>
+            <div class="bd" id="hist-body"></div>
+        </section>
+
+    </div>
+
+    <!-- ═══ правая колонка ═══ -->
+    <div class="col">
+
+        <section class="pan verdict">
+            <h3><span data-i18n="panel.verdict">Вердикт</span><span class="hx" id="verdict-meta"></span></h3>
+            <div class="chain" id="chain"></div>
+            <div class="tally" id="tally"></div>
+            <div class="vtext" id="vtext"></div>
+            <div id="vwarns"></div>
+        </section>
+
+        <section class="pan report">
+            <h3><span data-i18n="panel.tests">Тесты</span><span class="hx" id="tests-meta"></span></h3>
+            <div class="bd">
+                <table>
+                    <thead><tr>
+                        <th data-i18n="col.layer">Слой</th>
+                        <th data-i18n="col.target">Цель</th>
+                        <th data-i18n="col.method">Метод</th>
+                        <th data-i18n="col.path">Путь</th>
+                        <th style="text-align:right" data-i18n="col.time">Время</th>
+                        <th data-i18n="col.result">Результат</th>
+                    </tr></thead>
+                    <tbody id="tbody"></tbody>
+                </table>
+            </div>
+        </section>
+
+    </div>
+</main>
+
+<!-- ═══ вкладка «Сервисы» ═══ -->
+<main id="view-services" class="svcview hidden">
+    <section class="pan svcpan">
+        <h3><span data-i18n="svc.title">Что проверять</span><span class="hx" id="svc-count"></span></h3>
+        <div class="svc-bar">
+            <div class="seg presets" id="svc-presets">
+                <button data-preset="quick" data-i18n="svc.preset.quick">Быстрый</button>
+                <button data-preset="standard" data-i18n="svc.preset.standard">Стандартный</button>
+                <button data-preset="blocked" data-i18n="svc.preset.blocked">Блокируемые</button>
+                <button data-preset="all" data-i18n="svc.preset.all">Все</button>
+                <button data-preset="none" data-i18n="svc.preset.none">Ничего</button>
+            </div>
+            <input id="svc-search" type="search" spellcheck="false"
+                   data-i18n-ph="svc.search_ph" placeholder="Поиск"/>
+        </div>
+        <div class="svc-groups" id="svc-groups"></div>
+        <div class="svc-foot">
+            <input id="svc-host" type="text" spellcheck="false"
+                   data-i18n-ph="svc.custom_ph" placeholder="свой хост, например example.com"/>
+            <select id="svc-group">
+                <option value="runet" data-i18n="grp.runet">Рунет</option>
+                <option value="global" data-i18n="grp.global">Заграница</option>
+                <option value="blocked" selected data-i18n="grp.blocked">Блокируемые</option>
+                <option value="geo" data-i18n="grp.geo">Геоблок</option>
+            </select>
+            <button class="sbtn" id="svc-add" data-i18n="svc.add">Добавить</button>
+        </div>
+        <p class="svc-note" data-i18n="svc.note"></p>
+    </section>
+</main>
+
+<!-- ═══ вкладка «Карта» ═══ -->
+<main id="view-map" class="mapview hidden">
+    <section class="pan mappan">
+        <h3><span data-i18n="map.title">Карта досягаемости</span><span class="hx">MAP</span></h3>
+        <div class="map-bar">
+            <div class="map-sum" id="map-sum"></div>
+        </div>
+        <div class="map-stage">
+            <div class="map-wrap" id="map-wrap">
+                <!-- Упрощённый public-domain контур континентов, нарисован вручную
+                     в координатах (долгота, широта). Группа с transform переводит их
+                     в Plate Carrée: x = lon+180, y = 90-lat (viewBox 360×180). -->
+                <canvas id="map-canvas"></canvas>
+                <div class="map-overlay" id="map-overlay"></div>
+                <!-- управление лежит поверх карты: так оно всегда на виду
+                     и не зависит от того, как лягут строки шапки панели -->
+                <div class="map-ctl">
+                    <div class="seg mapstyles">
+                        <button id="ms-globe" class="on" data-i18n="map.style.globe">Глобус</button>
+                        <button id="ms-countries" data-i18n="map.style.countries">Страны</button>
+                        <button id="ms-dots" data-i18n="map.style.dots">Точки</button>
+                    </div>
+                    <button class="spinbtn" id="ms-spin" data-i18n-title="map.spin.hint" title="">
+                        <span id="ms-spin-label" data-i18n="map.spin.on">Вращение</span>
+                    </button>
+                </div>
+                <div class="map-empty hidden" id="map-empty"><span data-i18n="map.empty">Нажмите «Проверить»</span></div>
+            </div>
+        </div>
+        <div class="map-foot">
+            <div class="map-legend">
+                <span class="li"><i class="ldot ok"></i><span data-i18n="map.legend.ok">маршрут дошёл до цели</span></span>
+                <span class="li"><i class="lpop"></i><span data-i18n="map.legend.warn">ответила ближайшая точка присутствия CDN</span></span>
+                <span class="li"><i class="lx"></i><span data-i18n="map.legend.fail">путь оборвался здесь</span></span>
+                <span class="li"><i class="lpin you"></i><span data-i18n="map.legend.you">ты здесь</span></span>
+                <span class="li"><i class="lpin vpn"></i><span data-i18n="map.legend.vpn">выход VPN</span></span>
+            </div>
+            <p class="map-note" data-i18n="map.note.cdn"></p>
+            <p class="map-note quiet hidden" id="map-geo-off" data-i18n="map.geo.off"></p>
+        </div>
+    </section>
+</main>
+
+<!-- ═══ настройки ═══ -->
+<div class="modal hidden" id="settings">
+    <div class="sheet">
+        <h3><span data-i18n="set.title">Настройки</span><span class="hx">CFG</span></h3>
+        <div class="sbody">
+            <label class="frow">
+                <span data-i18n="set.lang">Язык</span>
+                <select id="set-lang">
+                    <option value="ru">Русский</option>
+                    <option value="en">English</option>
+                </select>
+            </label>
+            <label class="frow">
+                <span data-i18n="set.scale">Размер интерфейса</span>
+                <select id="set-scale">
+                    <option value="s" data-i18n="set.scale_s">Мелкий</option>
+                    <option value="m" data-i18n="set.scale_m">Средний</option>
+                    <option value="l" data-i18n="set.scale_l">Крупный</option>
+                    <option value="xl" data-i18n="set.scale_xl">Очень крупный</option>
+                </select>
+            </label>
+            <label class="frow">
+                <span data-i18n="set.font_hud">Шрифт заголовков</span>
+                <select id="set-font-hud"></select>
+            </label>
+            <label class="frow">
+                <span data-i18n="set.font_mono">Шрифт данных</span>
+                <select id="set-font-mono"></select>
+            </label>
+            <label class="frow">
+                <span data-i18n="set.font_file">Файл шрифта</span>
+                <input id="set-font-file" type="text" spellcheck="false"
+                       data-i18n-ph="set.font_file_ph" placeholder="C:\путь\к\шрифту.ttf"/>
+            </label>
+            <p class="snote" data-i18n="set.font_note"></p>
+            <label class="frow chk">
+                <span data-i18n="set.show_map">Показывать карту</span>
+                <input type="checkbox" id="set-map-on"/>
+            </label>
+            <label class="frow chk">
+                <span data-i18n="set.geo_lookup">Определять страну выхода (запрос к внешнему сервису)</span>
+                <input type="checkbox" id="set-geo"/>
+            </label>
+            <p class="snote" data-i18n="set.geo_note"></p>
+        </div>
+        <div class="sfoot">
+            <button class="sbtn ghost" id="set-cancel" data-i18n="set.cancel">Отмена</button>
+            <button class="sbtn" id="set-save" data-i18n="set.save">Сохранить</button>
+        </div>
+    </div>
+</div>
+
+<script src="./src/main.js" type="module"></script>
+</body>
+</html>

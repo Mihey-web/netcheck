@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Test
+        run: go test ./...
+
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+
+      # Без -s: этот флаг пропускает сборку фронтенда, а в чистом клоне
+      # frontend/dist пуст — go:embed вшил бы пустоту, и релизный exe
+      # открывал бы пустое окно.
+      - name: Build
+        run: wails build -nsis=false -ldflags "-X main.version=${{ github.ref_name }}"
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/bin/netcheck.exe
+          generate_release_notes: true

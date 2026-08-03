@@ -1,0 +1,413 @@
+/* netcheck — стиль «терминального отчёта» (Space Engineers HUD).
+   Перенесено из mockups/netcheck-c-report.html.
+   Проприетарный шрифт SE заменён на системный Bahnschrift. */
+
+:root{
+ --void:#04070c;
+ --panel:rgba(7,12,19,.88); --surface:#0b1119; --surface-2:#131c27;
+ --line:#1a2634; --line-2:#243447;
+ --hud:#5fd9f5; --hud-dim:#2b6a80;
+ --ink:#e9f4fb; --ink-2:#9db1c4; --muted:#63788c;
+ --good:#3ad684; --warn:#ffc233; --serious:#ff8a4c; --crit:#ff4d5e;
+ --mono:"Cascadia Mono",Consolas,ui-monospace,SFMono-Regular,monospace;
+ --hudfont:'Bahnschrift SemiBold Condensed','Bahnschrift','Segoe UI',sans-serif;
+}
+/* Шрифты переопределяются на лету: бэкенд отдаёт CSS с --hudfont/--mono
+   (и @font-face, если выбран файл), фронт кладёт его в <style id="font-css">. */
+*{box-sizing:border-box}
+html,body{height:100%}
+/* min-width здесь быть не должно: вместе с overflow:hidden он уносил правый
+   край вёрстки (вкладки, шестерёнку, управление картой) за границу окна,
+   откуда до них было уже не добраться. Узкое окно — забота media-запросов. */
+body{margin:0;color:var(--ink);background:var(--void);
+ font-family:"Segoe UI",system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased;
+ display:flex;flex-direction:column;overflow:hidden;
+ user-select:none;cursor:default}
+.scanlines{position:fixed;inset:0;pointer-events:none;z-index:60;opacity:.22;
+ background:repeating-linear-gradient(rgba(120,200,230,.035) 0 1px,rgba(0,0,0,0) 1px 3px)}
+
+/* ——— панели ——— */
+.pan{position:relative;background:var(--panel);border:1px solid var(--line);
+ clip-path:polygon(0 0,calc(100% - 11px) 0,100% 11px,100% 100%,11px 100%,0 calc(100% - 11px))}
+.pan>h3{margin:0;display:flex;align-items:center;gap:7px;
+ font-family:var(--hudfont);font-weight:400;font-size:11px;letter-spacing:.16em;
+ color:var(--hud);text-transform:uppercase;padding:7px 11px 6px;border-bottom:1px solid var(--line);
+ background:linear-gradient(90deg,rgba(95,217,245,.10),rgba(95,217,245,0))}
+.pan>h3 .hx{margin-left:auto;font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;color:var(--hud-dim)}
+.pan .bd{padding:8px 11px 10px}
+
+/* ——— шапка окна ——— */
+.top{flex:none;display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:8px 14px 7px;
+ border-bottom:1px solid var(--line-2);background:linear-gradient(180deg,rgba(10,17,26,.95),rgba(8,13,20,.78));
+ box-shadow:0 1px 0 rgba(95,217,245,.10)}
+.brand{display:flex;align-items:baseline;gap:10px;min-width:0}
+.brand b{font-family:var(--hudfont);font-weight:400;font-size:17px;letter-spacing:.19em;
+ line-height:1;color:var(--ink);text-transform:uppercase}
+.brand .sub{font-family:var(--mono);font-size:10px;color:var(--muted);letter-spacing:.06em;
+ white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.top .sp{flex:1}
+.seg{display:flex;border:1px solid var(--line-2);background:rgba(4,8,13,.7)}
+.seg button{appearance:none;border:0;background:transparent;color:var(--ink-2);cursor:pointer;
+ font-family:var(--mono);font-size:10px;padding:4px 10px;letter-spacing:.08em}
+.seg button:hover{color:var(--ink);background:rgba(95,217,245,.08)}
+.seg button.on{background:rgba(95,217,245,.20);color:#cdf4ff;box-shadow:inset 0 0 0 1px rgba(95,217,245,.4)}
+.gear{appearance:none;border:1px solid var(--line-2);background:rgba(4,8,13,.7);color:var(--ink-2);
+ cursor:pointer;width:27px;height:27px;display:flex;align-items:center;justify-content:center;padding:0}
+.gear:hover{color:var(--hud);border-color:var(--hud-dim);background:rgba(95,217,245,.07)}
+.gear svg{width:15px;height:15px;fill:currentColor}
+.gear:disabled{opacity:.4;cursor:default}
+.gear:disabled:hover{color:var(--ink-2);border-color:var(--line-2);background:rgba(4,8,13,.7)}
+
+/* ——— каркас ——— */
+main{flex:1 1 auto;min-height:0;display:grid;gap:10px;padding:10px 12px 12px;
+ grid-template-columns:280px minmax(0,1fr)}
+.col{min-height:0;display:flex;flex-direction:column;gap:10px}
+
+/* Узкое окно (или крупный масштаб интерфейса — он сужает вьюпорт в CSS-пикселях):
+   две колонки не помещаются, складываем в одну и разрешаем прокрутку.
+   Лучше листать, чем не видеть половину программы. */
+@media (max-width:820px){
+  main{grid-template-columns:minmax(0,1fr);overflow-y:auto}
+  main .col{min-height:auto}
+  .pan.report,.pan.hist{min-height:220px}
+}
+
+/* ——— кнопка ——— */
+.runbtn{appearance:none;border:0;cursor:pointer;position:relative;flex:none;
+ padding:8px 12px 7px;text-align:center;
+ font-family:var(--hudfont);font-size:12.5px;letter-spacing:.18em;color:#03212b;
+ text-transform:uppercase;
+ background:linear-gradient(180deg,#8ee9ff,#42c3e2);
+ clip-path:polygon(0 0,calc(100% - 8px) 0,100% 8px,100% 100%,8px 100%,0 calc(100% - 8px));
+ box-shadow:0 0 12px rgba(95,217,245,.22)}
+.runbtn:hover{background:linear-gradient(180deg,#a5eeff,#57d0ee);box-shadow:0 0 18px rgba(95,217,245,.38)}
+.runbtn small{display:block;margin-top:2px;font-family:var(--mono);font-size:8.5px;
+ letter-spacing:.06em;color:#0a3a49;text-transform:none}
+.runbtn:disabled{cursor:default;color:#9fc6d2;
+ background:linear-gradient(180deg,#2c5563,#1d3d4a);box-shadow:none}
+.runbtn:disabled:hover{background:linear-gradient(180deg,#2c5563,#1d3d4a);box-shadow:none}
+.runbtn:disabled small{color:#6d99a6}
+
+/* ——— окружение ——— */
+.kv{display:flex;align-items:baseline;gap:8px;font-size:11px;padding:3.5px 0;
+ border-bottom:1px dashed rgba(255,255,255,.05)}
+.kv:last-child{border-bottom:0}
+.kv .k{color:var(--muted);letter-spacing:.03em;flex:none}
+.kv .v{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--ink);
+ font-variant-numeric:tabular-nums;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kv .v.good{color:var(--good)}.kv .v.warn{color:var(--warn)}
+.kv .v.dim{color:var(--muted)}
+.subhd{margin:7px 0 2px;font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--hud-dim)}
+
+/* ——— история ——— */
+.hist{flex:1;min-height:0;display:flex;flex-direction:column}
+.hist .bd{flex:1;min-height:0;overflow:auto;scrollbar-width:thin;scrollbar-color:#22384a transparent;
+ display:flex;flex-direction:column;gap:1px;padding:6px 7px 8px}
+.hrow{display:flex;align-items:baseline;gap:8px;padding:5px 7px 4px;font-family:var(--mono);
+ font-size:10.5px;color:var(--ink-2);background:rgba(255,255,255,.02);border-left:2px solid var(--muted);
+ cursor:default;white-space:nowrap}
+.hrow:hover{background:rgba(95,217,245,.07)}
+.hrow .t{color:var(--ink);font-variant-numeric:tabular-nums;flex:none}
+.hrow .s{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.hrow.ok{border-left-color:var(--good)}
+.hrow.warn{border-left-color:var(--warn)}
+.hrow.bad{border-left-color:var(--serious)}
+.hrow.crit{border-left-color:var(--crit)}
+.hrow.cur{background:rgba(95,217,245,.10);box-shadow:inset 0 0 0 1px rgba(95,217,245,.35)}
+.hrow.cur .t::after{content:'◄';margin-left:6px;font-size:8px;color:var(--hud)}
+
+/* ——— вердикт ——— */
+.verdict{flex:none}
+.chain{display:flex;align-items:center;gap:0;padding:9px 11px 7px;flex-wrap:wrap;row-gap:5px}
+.chip{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;
+ letter-spacing:.06em;padding:3px 9px;border:1px solid var(--line-2);color:var(--ink-2);
+ background:rgba(255,255,255,.02);white-space:nowrap}
+.chip i{font-style:normal;width:7px;height:7px;flex:none;border-radius:50%;background:var(--line-2)}
+.chip.ok i{background:var(--good);box-shadow:0 0 6px rgba(58,214,132,.6)}
+.chip.warn{border-color:rgba(255,194,51,.4)}
+.chip.warn i{background:var(--warn);box-shadow:0 0 6px rgba(255,194,51,.6)}
+.chip.bad{border-color:rgba(255,77,94,.45)}
+.chip.bad i{background:var(--crit);box-shadow:0 0 7px rgba(255,77,94,.7)}
+/* ═══ общий счёт прогона ═══ */
+.tally{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline;
+ padding:7px 12px;border-bottom:1px solid var(--line);
+ font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;color:var(--muted)}
+.tally:empty{display:none}
+.tc{display:inline-flex;align-items:baseline;gap:5px;white-space:nowrap}
+.tc b{font-weight:400;font-size:14px;font-variant-numeric:tabular-nums;color:var(--ink)}
+.tc.ok b{color:var(--good)}
+.tc.warn b{color:var(--warn)}
+.tc.fail b{color:var(--crit)}
+.tc.skip b{color:var(--ink-2)}
+.tc.svc{margin-left:auto;color:var(--ink-2);gap:0}
+.tc.svc b{color:var(--hud);margin-left:5px}
+.tc.svc i{font-style:normal}
+
+/* ═══ вкладка «Сервисы» ═══ */
+.svcview{display:flex;padding:12px;gap:12px;min-height:0;overflow:hidden}
+.svcpan{flex:1;display:flex;flex-direction:column;min-height:0}
+.svc-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+ padding:8px 10px;border-bottom:1px solid var(--line-2)}
+.svc-bar .presets{flex:none}
+.svc-bar input{flex:1;min-width:140px;background:rgba(255,255,255,.03);
+ border:1px solid var(--line-2);color:var(--ink);padding:5px 9px;font:inherit;font-size:11px}
+.svc-groups{flex:1;min-height:0;overflow:auto;padding:10px}
+.svc-grp{margin-bottom:14px}
+.svc-grp h4{display:flex;align-items:baseline;gap:8px;margin:0 0 6px;
+ font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--hud)}
+.svc-grp h4 i{flex:1;font-style:normal;font-size:10px;letter-spacing:0;
+ text-transform:none;color:var(--ink-2)}
+.svc-all{flex:none;background:none;border:1px solid var(--line-2);color:var(--ink-2);
+ font:inherit;font-size:9px;letter-spacing:.06em;text-transform:uppercase;
+ padding:2px 7px;cursor:pointer}
+.svc-all:hover{border-color:var(--hud);color:var(--hud)}
+/* три колонки на широком окне, одна на узком — список из 50 строк
+   иначе превращается в бесконечную простыню */
+.svc-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:2px}
+.svc{display:flex;align-items:center;gap:7px;padding:4px 7px;cursor:pointer;
+ border:1px solid transparent;min-width:0}
+.svc:hover{background:rgba(255,255,255,.03);border-color:var(--line-2)}
+.svc.on{background:rgba(95,217,245,.06);border-color:rgba(95,217,245,.22)}
+.svc input{accent-color:var(--hud);flex:none;margin:0}
+/* имя не режем никогда — по нему сервис и узнают; ужимаются адрес и пояснение */
+.svc .n{flex:none;color:var(--ink);white-space:nowrap}
+.svc .h{flex:0 1 auto;min-width:0;color:var(--ink-2);font-size:10px;
+ white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.svc .q{flex:0 1 auto;min-width:0;color:var(--hud-dim);font-size:9px;margin-left:auto;
+ white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right}
+.svc.own .h{color:var(--hud-dim);font-style:italic}
+.svc-del{margin-left:auto;flex:none;background:none;border:none;cursor:pointer;
+ color:var(--ink-2);font-size:11px;padding:0 3px}
+.svc-del:hover{color:var(--crit)}
+.svc-foot{display:flex;gap:8px;padding:8px 10px;border-top:1px solid var(--line-2)}
+.svc-foot input{flex:1;min-width:0;background:rgba(255,255,255,.03);
+ border:1px solid var(--line-2);color:var(--ink);padding:5px 9px;font:inherit;font-size:11px}
+.svc-foot select{background:var(--surface);border:1px solid var(--line-2);
+ color:var(--ink);padding:5px 7px;font:inherit;font-size:11px}
+.svc-note{margin:0;padding:0 10px 9px;font-size:10px;color:var(--ink-2)}
+.empty.warn{color:var(--warn)}
+
+/* слой не проверялся — прогон оборвали ниже; гасим, а не красим тревожным */
+.chip.skip{opacity:.4;border-style:dashed}
+.chip.skip i{background:var(--line-2);box-shadow:none}
+.chip.done{border-color:rgba(95,217,245,.4)}
+.chip.done i{background:var(--hud);box-shadow:0 0 6px rgba(95,217,245,.6)}
+.chip.run i{background:var(--hud);animation:chipPulse .9s ease-in-out infinite alternate}
+@keyframes chipPulse{from{opacity:.25}to{opacity:1;box-shadow:0 0 7px rgba(95,217,245,.7)}}
+.chain .arr{flex:none;padding:0 5px;color:var(--hud-dim);font-family:var(--mono);font-size:10px}
+.vtext{padding:2px 12px 6px;font-size:12.5px;line-height:1.5;color:var(--ink)}
+.vtext p{margin:0 0 5px}
+.vtext p:last-child{margin-bottom:0}
+.vtext b{font-weight:600;color:var(--ink)}
+.vtext .svc{color:var(--serious)}
+.vtext .verr{color:var(--crit);font-family:var(--mono);font-size:11px}
+.vtext .dim{color:var(--muted)}
+.vnote{margin:2px 12px 11px;padding:6px 10px;font-size:11.5px;line-height:1.45;color:var(--warn);
+ border:1px solid rgba(255,194,51,.35);border-left:3px solid var(--warn);background:rgba(255,194,51,.05)}
+.vnote b{font-weight:600}
+.vhint{margin:0 12px 10px;font-family:var(--mono);font-size:10px;letter-spacing:.04em;color:var(--muted)}
+.hidden{display:none}
+
+/* ——— таблица тестов ——— */
+.report{flex:1;min-height:0;display:flex;flex-direction:column}
+.report .bd{flex:1;min-height:0;overflow:auto;scrollbar-width:thin;scrollbar-color:#22384a transparent;padding:0}
+table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:10.8px}
+thead th{position:sticky;top:0;z-index:2;background:var(--surface-2);color:var(--muted);
+ font-weight:400;font-size:9px;letter-spacing:.14em;text-transform:uppercase;text-align:left;
+ padding:5px 10px 4px;border-bottom:1px solid var(--line-2);white-space:nowrap}
+tbody td{padding:3.5px 10px 3px;border-bottom:1px solid rgba(26,38,52,.55);vertical-align:baseline;
+ white-space:nowrap;font-variant-numeric:tabular-nums}
+tbody tr:hover td{background:rgba(95,217,245,.05)}
+tr.grp td{border-top:1px solid var(--line-2)}
+td.layer{font-family:var(--hudfont);font-size:9.5px;letter-spacing:.14em;color:var(--hud-dim);
+ text-transform:uppercase;width:86px}
+tr.warngrp td.layer{color:var(--warn)}
+tr.badgrp td.layer{color:var(--serious)}
+td.tgt{color:var(--ink);max-width:220px;overflow:hidden;text-overflow:ellipsis}
+td.tgt .at{color:var(--muted)}
+td.mth{color:var(--ink-2);width:74px}
+td.path{width:88px;color:var(--ink-2)}
+td.path.px{color:var(--hud)}
+td.ms{text-align:right;width:64px;color:var(--ink-2)}
+td.res{width:44%;max-width:0;overflow:hidden;text-overflow:ellipsis}
+.st{display:inline-block;min-width:38px;letter-spacing:.06em}
+.st.ok{color:var(--good)}
+.st.warn{color:var(--warn)}
+.st.fail{color:var(--crit)}
+td.res .why{color:var(--ink-2)}
+td.res .why em{font-style:normal;color:var(--muted)}
+td.empty-cell{padding:14px 12px;color:var(--muted);white-space:normal}
+
+/* ——— пустые состояния ——— */
+.empty{padding:8px 6px;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+
+/* строка истории кликабельна — открывает сохранённый прогон */
+.hrow{cursor:pointer}
+
+/* ——— карта: холст с географией + DOM-слой меток ——— */
+.map-bar{display:flex;align-items:center;gap:12px;padding:7px 11px 4px;flex-wrap:wrap}
+.map-bar .map-sum{flex:1;min-width:0}
+.seg.mapstyles button{padding:3px 9px}
+/* слева, а не справа: правый край панели сейчас может уходить за границу окна,
+   и управление становилось недоступным */
+.map-ctl{position:absolute;top:9px;left:10px;z-index:6;display:flex;align-items:center;gap:8px}
+.map-ctl .seg{background:rgba(4,8,13,.85)}
+.spinbtn{appearance:none;cursor:pointer;border:1px solid var(--line-2);background:rgba(4,8,13,.85);
+ color:var(--hud);font-family:var(--mono);font-size:10px;letter-spacing:.06em;padding:4px 9px}
+.spinbtn:hover{border-color:var(--hud-dim);background:rgba(95,217,245,.08)}
+.spinbtn.off{color:var(--muted)}
+.spinbtn.hidden{display:none}
+#map-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:grab}
+#map-canvas:active{cursor:grabbing}
+.map-overlay{position:absolute;left:0;top:0;pointer-events:none}
+.mdot{position:absolute;width:7px;height:7px;margin:-3.5px 0 0 -3.5px;border-radius:50%;
+ pointer-events:auto;cursor:default}
+.mdot.ok{background:var(--good);box-shadow:0 0 0 4px rgba(58,214,132,.16),0 0 7px rgba(58,214,132,.7)}
+.mdot.warn{background:var(--warn);box-shadow:0 0 0 4px rgba(255,194,51,.16),0 0 7px rgba(255,194,51,.7)}
+.mdot.bad{background:var(--crit);box-shadow:0 0 0 4px rgba(255,77,94,.18),0 0 7px rgba(255,77,94,.75)}
+.mlab{position:absolute;font-family:var(--mono);font-size:9.5px;color:var(--ink-2);
+ white-space:nowrap;text-shadow:0 0 4px #04070c,0 0 8px #04070c}
+.mlab.left{transform:translateX(-100%)}
+.mlab.pin{color:var(--hud)}
+.mpin{position:absolute;width:11px;height:11px;margin:-5.5px 0 0 -5.5px;
+ border:1.5px solid var(--hud);pointer-events:auto}
+.mpin.here{transform:rotate(45deg);border-radius:1px}
+.mpin.vpn{transform:rotate(45deg);background:rgba(95,217,245,.25)}
+.mline{position:absolute;height:0;border-top:1px dashed rgba(95,217,245,.55);transform-origin:0 0}
+
+/* Отметки лучей. Крестик — место, где путь оборвался; ромб — ближайшая
+   точка присутствия CDN, а не сервер в той стране, где числится адрес. */
+.mx{position:absolute;width:13px;height:13px;margin:-6.5px 0 0 -6.5px;pointer-events:auto}
+.mx::before,.mx::after{content:'';position:absolute;left:0;top:6px;width:13px;height:2px;
+  background:var(--crit);border-radius:1px;box-shadow:0 0 6px rgba(255,77,94,.8)}
+.mx::before{transform:rotate(45deg)}
+.mx::after{transform:rotate(-45deg)}
+.mpop{position:absolute;width:9px;height:9px;margin:-4.5px 0 0 -4.5px;transform:rotate(45deg);
+  background:rgba(58,214,132,.25);border:1.5px solid var(--good);
+  box-shadow:0 0 7px rgba(58,214,132,.5);pointer-events:auto}
+/* Полый кружок — сервис отвечает, но маршрут дальше не прослеживается.
+   Ничего не сломано, просто не видно, поэтому и отметка приглушённая. */
+.mdim{position:absolute;width:7px;height:7px;margin:-3.5px 0 0 -3.5px;border-radius:50%;
+  border:1.5px solid var(--ink-3, #6b7c93);background:transparent;opacity:.75;pointer-events:auto}
+.mlab.bad{color:var(--crit)}
+
+/* ——— настройки ——— */
+.modal{position:fixed;inset:0;z-index:70;display:flex;align-items:center;justify-content:center;
+ background:rgba(2,5,9,.72);backdrop-filter:blur(2px)}
+.modal.hidden{display:none}
+.sheet{width:460px;max-width:92vw;background:var(--panel);border:1px solid var(--line-2);
+ box-shadow:0 18px 50px rgba(0,0,0,.6);
+ clip-path:polygon(0 0,calc(100% - 13px) 0,100% 13px,100% 100%,13px 100%,0 calc(100% - 13px))}
+.sheet>h3{margin:0;display:flex;align-items:center;gap:7px;
+ font-family:var(--hudfont);font-weight:400;font-size:11px;letter-spacing:.16em;
+ color:var(--hud);text-transform:uppercase;padding:8px 12px 7px;border-bottom:1px solid var(--line);
+ background:linear-gradient(90deg,rgba(95,217,245,.10),rgba(95,217,245,0))}
+.sheet>h3 .hx{margin-left:auto;font-size:9px;color:var(--hud-dim);letter-spacing:.2em}
+.sbody{padding:13px 14px 4px;display:flex;flex-direction:column;gap:10px}
+.frow{display:flex;align-items:center;gap:10px;font-size:11.5px;color:var(--ink-2)}
+.frow>span{flex:none;width:150px}
+.frow select,.frow input{flex:1;min-width:0;background:var(--surface);color:var(--ink);
+ border:1px solid var(--line-2);padding:5px 7px;font-family:var(--mono);font-size:11px;
+ outline:none;border-radius:0}
+.frow select:focus,.frow input:focus{border-color:var(--hud-dim);box-shadow:0 0 0 1px rgba(95,217,245,.25)}
+.frow input::placeholder{color:var(--muted)}
+.snote{margin:2px 0 0;font-size:10.5px;line-height:1.45;color:var(--muted)}
+.sfoot{display:flex;justify-content:flex-end;gap:8px;padding:12px 14px 14px}
+.sbtn{appearance:none;border:0;cursor:pointer;padding:6px 16px 5px;
+ font-family:var(--hudfont);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;
+ color:#03212b;background:linear-gradient(180deg,#8ee9ff,#42c3e2);
+ clip-path:polygon(0 0,calc(100% - 7px) 0,100% 7px,100% 100%,7px 100%,0 calc(100% - 7px))}
+.sbtn:hover{background:linear-gradient(180deg,#a5eeff,#57d0ee)}
+.sbtn.ghost{color:var(--ink-2);background:var(--surface-2);box-shadow:inset 0 0 0 1px var(--line-2)}
+.sbtn.ghost:hover{color:var(--ink);background:#18242f}
+
+/* чекбоксы настроек */
+.frow.chk>span{width:auto;flex:1}
+.frow.chk input[type=checkbox]{flex:none;width:14px;height:14px;accent-color:var(--hud);cursor:pointer}
+
+/* ——— вкладка «Карта» ——— */
+.mapview{flex:1 1 auto;min-height:0;display:flex;padding:10px 12px 12px}
+.mappan{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0}
+main.hidden{display:none}
+
+.map-sum{display:flex;flex-wrap:wrap;gap:4px 18px;padding:0;
+ font-family:var(--mono);font-size:10.5px;color:var(--ink-2);min-height:14px}
+.map-bar{border-bottom:1px solid var(--line)}
+.map-sum .k{color:var(--muted);margin-right:6px}
+.map-sum b{font-weight:400;color:var(--ink);font-variant-numeric:tabular-nums}
+.map-sum b.good{color:var(--good)}
+.map-sum b.warn{color:var(--warn)}
+.map-sum b.bad{color:var(--crit)}
+.map-sum b.hud{color:var(--hud)}
+
+.map-stage{flex:1;min-height:0;overflow:hidden;
+ display:flex;align-items:stretch;padding:8px 11px}
+/* холст рисует по фактическому размеру контейнера, поэтому у обёртки
+   должна быть настоящая высота — иначе карта схлопывается в ноль */
+.map-wrap{position:relative;flex:1;min-width:0;min-height:260px;width:100%;margin:0}
+#map-svg{display:block;width:100%;height:auto}
+#map-svg .sea{fill:#060b12}
+#map-svg .grat path{stroke:rgba(95,217,245,.055);stroke-width:.4;fill:none}
+#map-svg .land{fill:#14212f;stroke:rgba(95,217,245,.38);stroke-width:.45;
+ stroke-linejoin:round;stroke-linecap:round}
+#map-svg .hole{fill:#060b12;stroke:rgba(95,217,245,.2);stroke-width:.3}
+#map-svg.dim .land{fill:#0e1620;stroke:rgba(120,140,160,.25)}
+#map-svg .geoline{stroke:var(--hud);stroke-width:.7;stroke-dasharray:3 3;fill:none;opacity:.75}
+
+.map-overlay{position:absolute;inset:0;pointer-events:none}
+.map-overlay>*{pointer-events:auto}
+/* .hidden объявлен выше по файлу, поэтому у равной специфичности выигрывает
+   display:flex — нужна явная пара, иначе надпись висит поверх готовой карты */
+.map-empty.hidden{display:none}
+.map-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+ font-family:var(--hudfont);font-size:13px;letter-spacing:.22em;text-transform:uppercase;
+ color:var(--muted);background:rgba(4,7,12,.3)}
+
+/* точки якорей */
+.mk{position:absolute;transform:translate(-50%,-50%);z-index:3;width:9px;height:9px}
+.mk:hover{z-index:9}
+.mk .dot{position:absolute;inset:0;margin:auto;width:7px;height:7px;border-radius:50%;
+ background:var(--good);box-shadow:0 0 7px rgba(58,214,132,.85),0 0 2px rgba(0,0,0,.8)}
+.mk.warn .dot{background:var(--warn);box-shadow:0 0 7px rgba(255,194,51,.85),0 0 2px rgba(0,0,0,.8)}
+.mk.fail .dot{background:var(--crit);box-shadow:0 0 8px rgba(255,77,94,.9),0 0 2px rgba(0,0,0,.8)}
+.mk .lbl{position:absolute;left:12px;top:50%;transform:translateY(-50%);white-space:nowrap;
+ font-family:var(--mono);font-size:9.5px;letter-spacing:.03em;color:var(--ink-2);
+ text-shadow:0 0 4px #000,0 1px 3px #000;pointer-events:none}
+.mk.left .lbl{left:auto;right:12px}
+.mk.fail .lbl{color:var(--crit)}
+.mk.quiet .lbl{opacity:0;transition:opacity .12s}
+.mk:hover .lbl{opacity:1;color:var(--ink)}
+.mk.fail:hover .lbl{color:var(--crit)}
+
+/* метки выхода: ромбы */
+.gp{position:absolute;transform:translate(-50%,-50%);z-index:4;width:13px;height:13px}
+.gp:hover{z-index:10}
+.gp .pin{position:absolute;inset:0;margin:auto;width:8px;height:8px;transform:rotate(45deg);
+ background:rgba(255,194,51,.12);border:1.5px solid var(--warn);box-shadow:0 0 8px rgba(255,194,51,.7)}
+.gp.vpn .pin{background:rgba(95,217,245,.12);border-color:var(--hud);box-shadow:0 0 8px rgba(95,217,245,.8)}
+.gp .lbl{position:absolute;left:14px;top:50%;transform:translateY(-50%);white-space:nowrap;
+ font-family:var(--mono);font-size:9.5px;color:var(--warn);
+ text-shadow:0 0 4px #000,0 1px 3px #000;pointer-events:none}
+.gp.vpn .lbl{color:var(--hud)}
+.gp.left .lbl{left:auto;right:14px}
+
+/* легенда и честная подпись */
+.map-foot{flex:none;padding:7px 12px 10px;border-top:1px solid var(--line)}
+.map-legend{display:flex;flex-wrap:wrap;gap:4px 16px;font-family:var(--mono);font-size:10px;color:var(--ink-2)}
+.map-legend .li{display:flex;align-items:center;gap:6px;white-space:nowrap}
+.map-legend .ldot{width:7px;height:7px;border-radius:50%;flex:none}
+.map-legend .ldot.ok{background:var(--good);box-shadow:0 0 5px rgba(58,214,132,.7)}
+/* Значки легенды повторяют то, что рисуется на карте: ромб — точка
+   присутствия CDN, крестик — место обрыва. */
+.map-legend .lpop{width:7px;height:7px;flex:none;transform:rotate(45deg);
+  background:rgba(58,214,132,.25);border:1.5px solid var(--good);box-shadow:0 0 5px rgba(58,214,132,.5)}
+.map-legend .lx{position:relative;width:9px;height:9px;flex:none}
+.map-legend .lx::before,.map-legend .lx::after{content:'';position:absolute;left:0;top:4px;
+  width:9px;height:1.6px;background:var(--crit);border-radius:1px}
+.map-legend .lx::before{transform:rotate(45deg)}
+.map-legend .lx::after{transform:rotate(-45deg)}
+.map-legend .lpin{width:7px;height:7px;flex:none;transform:rotate(45deg);
+ border:1.5px solid var(--warn);box-shadow:0 0 5px rgba(255,194,51,.6)}
+.map-legend .lpin.vpn{border-color:var(--hud);box-shadow:0 0 5px rgba(95,217,245,.7)}
+.map-note{margin:6px 0 0;font-size:10.5px;line-height:1.45;color:var(--muted);max-width:900px}
+.map-note.quiet{font-family:var(--mono);font-size:10px;letter-spacing:.03em}
