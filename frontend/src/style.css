@@ -115,6 +115,21 @@ main{flex:1 1 auto;min-height:0;display:grid;gap:10px;padding:10px 12px 12px;
 .hrow.crit{border-left-color:var(--crit)}
 .hrow.cur{background:rgba(95,217,245,.10);box-shadow:inset 0 0 0 1px rgba(95,217,245,.35)}
 .hrow.cur .t::after{content:'◄';margin-left:6px;font-size:8px;color:var(--hud)}
+/* крестик удаления: выезжает по наведению, чтобы ряд крестиков не шумел */
+.hrow .hdel{flex:none;align-self:center;margin-left:2px;padding:0 3px;background:none;border:0;
+ cursor:pointer;color:var(--muted);font-family:var(--mono);font-size:11px;line-height:1;
+ opacity:0;transition:opacity .12s}
+.hrow:hover .hdel{opacity:1}
+.hrow .hdel:hover{color:var(--crit)}
+.hist>h3 .hclear{flex:none;background:none;border:1px solid var(--line-2);color:var(--ink-2);
+ font-family:var(--mono);font-size:9px;letter-spacing:.06em;text-transform:uppercase;
+ padding:2px 7px;cursor:pointer}
+.hist>h3 .hclear:hover{border-color:var(--crit);color:var(--crit);background:rgba(255,77,94,.06)}
+.hist>h3 .hclear.armed{border-color:var(--crit);color:var(--crit);background:rgba(255,77,94,.14)}
+/* во время прогона история не кликается — пусть это будет видно */
+.hist.busy .hrow{cursor:default;opacity:.55}
+.hist.busy .hrow:hover{background:rgba(255,255,255,.02)}
+.hist.busy .hdel{display:none}
 
 /* ——— вердикт ——— */
 .verdict{flex:none}

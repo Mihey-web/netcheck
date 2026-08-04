@@ -57,6 +57,12 @@ func (a *App) GetHistory() []history.Entry {
 	return entries
 }
 
+// DeleteRuns убирает из истории выбранные прогоны (время в RFC3339).
+func (a *App) DeleteRuns(ats []string) error { return history.Delete(ats) }
+
+// ClearHistory стирает историю прогонов целиком.
+func (a *App) ClearHistory() error { return history.Clear() }
+
 // GetRun — полный отчёт прошлого прогона по времени (RFC3339), с вердиктом на
 // текущем языке. Пустой at — самый свежий прогон. Так результат виден сразу
 // после запуска приложения, а не только до его закрытия.

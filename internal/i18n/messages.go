@@ -35,13 +35,50 @@ var messages = map[string]map[Lang]string{
 		RU: "Рунет работает, но заграничные сайты недоступны.",
 		EN: "Local (RU) sites work, but foreign sites are unreachable.",
 	},
-	"verdict.runet_down": {
+	"verdict.runet_down_vpn": {
 		RU: "Заграница работает, а рунет недоступен — похоже, VPN заворачивает и российский трафик.",
 		EN: "Foreign sites work, but local (RU) sites are unreachable — the VPN is probably routing local traffic too.",
 	},
+	// то же самое, но без VPN: сваливать на него, когда его нет, — выдумка
+	"verdict.runet_down": {
+		RU: "Заграница работает, а российские сайты не открываются — похоже на проблему маршрутизации у провайдера.",
+		EN: "Foreign sites work, but Russian sites don't open — this looks like a routing problem at your ISP.",
+	},
+	"verdict.apipa": {
+		RU: "Роутер не выдал адрес: Windows назначила себе временный 169.254.x.x. Wi-Fi подключён, но сети за ним нет — переподключитесь к сети или перезагрузите роутер.",
+		EN: "The router handed out no address: Windows fell back to a temporary 169.254.x.x. Wi-Fi is connected, but there is no network behind it — reconnect or restart the router.",
+	},
+	"verdict.no_route": {
+		RU: "У соединения нет маршрута наружу: шлюз не задан. Сеть подключена, но не настроена.",
+		EN: "The connection has no route out: no gateway is set. The network is attached but not configured.",
+	},
+	"verdict.captive": {
+		RU: "Это сеть с входом через браузер: контрольный запрос перехватывают и отвечают на него вместо адресата. Откройте браузер и авторизуйтесь в сети — до этого не заработает ничего.",
+		EN: "This network wants you to sign in through a browser: the control request is intercepted and answered by someone else. Open a browser and log in — nothing will work until you do.",
+	},
+	"verdict.http_only": {
+		RU: "Наружу связь есть — обычный HTTP-запрос доходит, — но ни один сайт не открывается. Похоже, режут именно HTTPS или сломан DNS.",
+		EN: "There is connectivity — a plain HTTP request gets through — yet no site opens. It looks like HTTPS is being blocked or DNS is broken.",
+	},
+	"verdict.nothing_checked": {
+		RU: "Проверять было нечего: на вкладке «Сервисы» не выбрано ни одной цели.",
+		EN: "There was nothing to check: no targets are selected on the “Services” tab.",
+	},
+	"verdict.services_skipped": {
+		RU: "Проверка сервисов пропущена: пока не открывается ни один сайт, её результат ничего бы не значил.",
+		EN: "The per-service checks were skipped: while no site opens at all, their result would mean nothing.",
+	},
 	"dns.spoof": {
-		RU: "Провайдер подменяет DNS-ответы (системный DNS расходится с DoH).",
-		EN: "Your ISP is spoofing DNS answers (system DNS differs from DoH).",
+		RU: "Резолвер вернул адрес, которого у этого домена быть не может — DNS-ответы подменяются (провайдером, роутером или локальным фильтром).",
+		EN: "The resolver returned an address this domain cannot have — DNS answers are being spoofed (by the ISP, the router or a local filter).",
+	},
+	"dns.down": {
+		RU: "Системный DNS не отвечает — имена сайтов не превращаются в адреса. Обычно помогает смена DNS-сервера в настройках адаптера.",
+		EN: "The system DNS is not answering — host names don't resolve to addresses. Switching the DNS server in the adapter settings usually helps.",
+	},
+	"svc.dns_unreachable": {
+		RU: "Причину по каждому сервису установить не удалось: имена не резолвятся, спрашивать было нечем.",
+		EN: "The per-service cause couldn't be established: names don't resolve, so there was nothing to ask.",
 	},
 
 	// блокировки по механизмам

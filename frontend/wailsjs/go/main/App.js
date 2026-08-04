@@ -10,8 +10,16 @@ export function Catalog() {
   return window['go']['main']['App']['Catalog']();
 }
 
+export function ClearHistory() {
+  return window['go']['main']['App']['ClearHistory']();
+}
+
 export function CurrentLang() {
   return window['go']['main']['App']['CurrentLang']();
+}
+
+export function DeleteRuns(arg1) {
+  return window['go']['main']['App']['DeleteRuns'](arg1);
 }
 
 export function FontCSS() {

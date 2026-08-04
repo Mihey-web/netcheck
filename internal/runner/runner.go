@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -76,9 +77,46 @@ func (Live) Trace(ctx context.Context, ip string) ([]probe.Hop, error) {
 	return probe.Trace(ctx, ip)
 }
 
+// Progress — событие хода прогона. Либо «слой закончен» (Done), либо
+// очередной готовый результат (Result): таблица заполняется по ходу дела,
+// а не одним куском в конце, и видно, на чём именно прогон сейчас стоит.
 type Progress struct {
-	Layer string `json:"layer"`
-	Done  bool   `json:"done"`
+	Layer  string        `json:"layer"`
+	Done   bool          `json:"done,omitempty"`
+	Result *probe.Result `json:"result,omitempty"`
+}
+
+// captiveURL — контрольный запрос по обычному HTTP. Ровно им пользуется сам
+// Windows, чтобы понять, есть ли интернет: ответ должен быть 200 с телом
+// captiveBody. Всё остальное означает, что вместо адресата ответил кто-то
+// по пути — обычно окно входа в публичный Wi-Fi.
+const (
+	captiveURL  = "http://www.msftconnecttest.com/connecttest.txt"
+	captiveBody = "Microsoft Connect Test"
+)
+
+// значения Report.Captive живут в пакете verdict — он же их и толкует
+const (
+	captivePortal = verdict.CaptivePortal
+	captiveOpen   = verdict.CaptiveOpen
+	captiveDead   = verdict.CaptiveDead
+)
+
+// maxParallelChecks — сколько блокируемых целей проверять одновременно.
+// Без предела полный набор запускал полсотни цепочек DNS+TCP+TLS разом,
+// и сеть отвечала таймаутами просто от собственной перегрузки.
+const maxParallelChecks = 12
+
+// captiveKind разбирает ответ на контрольный запрос.
+func captiveKind(r probe.Result) string {
+	switch {
+	case r.Code == 0:
+		return "" // никто не ответил — связи нет вовсе
+	case r.Code == 200 && strings.Contains(r.Body, captiveBody):
+		return captiveOpen
+	default:
+		return captivePortal
+	}
 }
 
 type Report struct {
@@ -91,6 +129,10 @@ type Report struct {
 	Verdict   verdict.Verdict          `json:"verdict"`
 	// Aborted — прогон оборван на нижнем слое: дальше проверять было нечего.
 	Aborted bool `json:"aborted,omitempty"`
+	// Captive — что показал контрольный HTTP-запрос, когда не открылся
+	// ни один сайт: "portal" (ответ подменён страницей входа), "open"
+	// (наружу ходим, а сайты не открываются) или "" (не ответил никто).
+	Captive string `json:"captive,omitempty"`
 	// Routes — лучи от пользователя до места, где путь кончился (вкладка «Карта»).
 	//
 	// Пришли на смену пингу облачных якорей. Пинг до чужого дата-центра
@@ -106,7 +148,9 @@ type Report struct {
 // Relocalize пересобирает вердикт сохранённого отчёта на другом языке.
 // Факты (окружение, слои, диагнозы) языка не знают — переводится только текст.
 func Relocalize(rep Report, l i18n.Lang) Report {
-	rep.Verdict = verdict.Build(l, verdict.Input{Env: rep.Env, Layers: rep.Layers, Services: rep.Services})
+	rep.Verdict = verdict.Build(l, verdict.Input{
+		Env: rep.Env, Layers: rep.Layers, Services: rep.Services, Captive: rep.Captive,
+	})
 	return rep
 }
 
@@ -140,36 +184,63 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 	withTimeout := func() (context.Context, context.CancelFunc) {
 		return context.WithTimeout(runCtx, probeTimeout)
 	}
-	report := func(layer string) {
-		if onProgress != nil {
-			onProgress(Progress{Layer: layer, Done: true})
+	// События уходят из нескольких горутин разом — сериализуем, чтобы
+	// подписчик (UI) получал их по одному и в целости.
+	var emitMu sync.Mutex
+	emit := func(pr Progress) {
+		if onProgress == nil {
+			return
+		}
+		emitMu.Lock()
+		onProgress(pr)
+		emitMu.Unlock()
+	}
+	report := func(layer string) { emit(Progress{Layer: layer, Done: true}) }
+	// live — результат сразу на экран, не дожидаясь конца слоя.
+	live := func(layer string, rs ...probe.Result) {
+		for i := range rs {
+			r := rs[i]
+			emit(Progress{Layer: layer, Result: &r})
 		}
 	}
 
 	col := &collector{}
 	rep := Report{StartedAt: started, Env: snap}
 	proxyURL := firstProxyURL(snap)
+	// add — и в отчёт, и на экран. Порядок в отчёте остаётся детерминированным
+	// (его задают вызовы add), а на экран строки идут по мере готовности.
+	add := func(layer string, rs ...probe.Result) {
+		col.add(rs...)
+		live(layer, rs...)
+	}
 
 	// ── слой 1: шлюз ─────────────────────────────────────────────
 	gwStatus := probe.StatusOK
-	if cfg.Ping.Gateway && snap.Gateway != "" && net.ParseIP(snap.Gateway) != nil {
-		c, cancelProbe := withTimeout()
-		res := p.Ping(c, snap.Gateway)
-		cancelProbe()
-		col.add(res)
-		gwStatus = res.Status
-
-		if gwStatus == probe.StatusFail && cfg.Ping.GlobalIP != "" {
-			// Роутер молчит на ICMP — это ещё не приговор: домашние роутеры
-			// и корпоративные сети сплошь и рядом просто не отвечают на ping.
-			// Один дешёвый вопрос наружу отличает «фильтруется ICMP»
-			// от «связи нет вообще», и только во втором случае рвём прогон.
+	if cfg.Ping.Gateway {
+		if snap.Gateway == "" || net.ParseIP(snap.Gateway) == nil {
+			// Адаптер подключён, а маршрута по умолчанию нет: сеть не настроена.
+			// Раньше этот случай молча считался «шлюз в порядке», и прогон
+			// уходил проверять интернет, которого взяться неоткуда.
+			gwStatus = probe.StatusFail
+		} else {
 			c, cancelProbe := withTimeout()
-			ctrl := p.TCPConnect(c, net.JoinHostPort(cfg.Ping.GlobalIP, "443"))
+			res := p.Ping(c, snap.Gateway)
 			cancelProbe()
-			col.add(ctrl)
-			if ctrl.Status == probe.StatusOK {
-				gwStatus = probe.StatusWarn
+			add("gateway", res)
+			gwStatus = res.Status
+
+			if gwStatus == probe.StatusFail && cfg.Ping.GlobalIP != "" {
+				// Роутер молчит на ICMP — это ещё не приговор: домашние роутеры
+				// и корпоративные сети сплошь и рядом просто не отвечают на ping.
+				// Один дешёвый вопрос наружу отличает «фильтруется ICMP»
+				// от «связи нет вообще», и только во втором случае рвём прогон.
+				c, cancelProbe := withTimeout()
+				ctrl := p.TCPConnect(c, net.JoinHostPort(cfg.Ping.GlobalIP, "443"))
+				cancelProbe()
+				add("gateway", ctrl)
+				if ctrl.Status == probe.StatusOK {
+					gwStatus = probe.StatusWarn
+				}
 			}
 		}
 	}
@@ -179,18 +250,7 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 	// Связи нет от слова совсем: всё, что выше, показало бы одинаковый «fail»
 	// и только сбивало бы с толку. Помечаем остальные слои непроверенными.
 	if gwStatus == probe.StatusFail {
-		for _, l := range []string{"dns", "runet", "global", "blocked"} {
-			rep.Layers = append(rep.Layers, verdict.LayerStatus{Layer: l, Status: probe.StatusSkip})
-			report(l)
-		}
-		rep.Aborted = true
-		rep.Results = col.results
-		rep.Verdict = verdict.Build(lang, verdict.Input{Env: snap, Layers: rep.Layers})
-		rep.Duration = time.Since(started)
-		if rep.Duration <= 0 {
-			rep.Duration = time.Nanosecond
-		}
-		return rep
+		return finish(&rep, col, started, lang, skipFrom("dns", report))
 	}
 
 	// ── слой 2: DNS тремя путями ─────────────────────────────────
@@ -206,12 +266,14 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 			c, cancelProbe := withTimeout()
 			defer cancelProbe()
 			sysRes = p.ResolveSystem(c, dnsProbe)
+			live("dns", sysRes)
 		}()
 		go func() {
 			defer wg.Done()
 			c, cancelProbe := withTimeout()
 			defer cancelProbe()
 			udpRes = p.ResolveUDP(c, dnsProbe, "8.8.8.8:53")
+			live("dns", udpRes)
 		}()
 		go func() {
 			defer wg.Done()
@@ -220,9 +282,10 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 				dohRes = p.ResolveDoH(c, dnsProbe, ep)
 				cancelProbe()
 				if dohRes.Status == probe.StatusOK {
-					return
+					break
 				}
 			}
+			live("dns", dohRes)
 		}()
 		wg.Wait()
 		col.add(sysRes, udpRes, dohRes)
@@ -237,23 +300,61 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 		case analyze.PrivateAnswer(sysIPs):
 			dnsStatus = probe.StatusWarn
 		}
+		// Молчат все три пути сразу — системный резолвер, UDP мимо провайдера
+		// и DoH. Это уже не «сломан DNS»: так выглядит сеть, из которой наружу
+		// не уходит ничего. Один SYN отвечает на вопрос дешевле, чем два
+		// следующих слоя, которым всё равно нечем резолвить имена.
+		if sysRes.Status != probe.StatusOK && udpRes.Status != probe.StatusOK &&
+			dohRes.Status != probe.StatusOK && cfg.Ping.GlobalIP != "" {
+			c, cancelProbe := withTimeout()
+			ctrl := p.TCPConnect(c, net.JoinHostPort(cfg.Ping.GlobalIP, "443"))
+			cancelProbe()
+			add("dns", ctrl)
+			if ctrl.Status != probe.StatusOK {
+				rep.Captive = captiveDead
+				rep.Layers = append(rep.Layers, verdict.LayerStatus{Layer: "dns", Status: dnsStatus})
+				report("dns")
+				return finish(&rep, col, started, lang, skipFrom("runet", report))
+			}
+		}
 	}
 	rep.Layers = append(rep.Layers, verdict.LayerStatus{Layer: "dns", Status: dnsStatus})
 	report("dns")
 
 	// ── слои 3–4: рунет и заграница ──────────────────────────────
-	runetStatus := checkZone(p, col, withTimeout, cfg.Targets.Runet)
+	runetStatus := checkZone(p, col, withTimeout, cfg.Targets.Runet, "runet", live)
 	rep.Layers = append(rep.Layers, verdict.LayerStatus{Layer: "runet", Status: runetStatus})
 	report("runet")
 
 	if cfg.Ping.GlobalIP != "" {
 		c, cancelProbe := withTimeout()
-		col.add(p.Ping(c, cfg.Ping.GlobalIP))
+		add("global", p.Ping(c, cfg.Ping.GlobalIP))
 		cancelProbe()
 	}
-	globalStatus := checkZone(p, col, withTimeout, cfg.Targets.Global)
+	globalStatus := checkZone(p, col, withTimeout, cfg.Targets.Global, "global", live)
+
+	// Не открылось ничего — ни здесь, ни за границей. Прежде чем говорить
+	// «интернета нет», один контрольный запрос по обычному HTTP: он отличает
+	// оборванную связь от публичного Wi-Fi, который держит нас на странице
+	// входа, и от сети, где режут именно HTTPS.
+	deadEnd := runetStatus == probe.StatusFail && globalStatus == probe.StatusFail
+	if deadEnd {
+		c, cancelProbe := withTimeout()
+		ctrl := p.HTTPGet(c, captiveURL, nil)
+		cancelProbe()
+		add("global", ctrl)
+		rep.Captive = captiveKind(ctrl)
+	}
 	rep.Layers = append(rep.Layers, verdict.LayerStatus{Layer: "global", Status: globalStatus})
 	report("global")
+
+	// Сеть мертва до самого верха: проверять по отдельности два десятка
+	// сервисов бессмысленно. Каждый дал бы тот же таймаут, прогон растянулся
+	// бы на лишние полминуты, а вердикт получился бы враньём — «домен больше
+	// не существует» про YouTube, который просто некуда спросить.
+	if deadEnd {
+		return finish(&rep, col, started, lang, skipFrom("blocked", report))
+	}
 
 	// ── карта: «откуда нас видно» ────────────────────────────────
 	// Идёт параллельно слою сервисов — на общее время прогона не влияет.
@@ -281,12 +382,17 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 	// геоблокируемые проверяются тем же способом: разницу ставит analyze
 	blockedHosts := append(append([]string{}, cfg.Targets.Blocked...), cfg.Targets.GeoBlocked...)
 	outs := make([]blockedOutcome, len(blockedHosts))
+	sem := make(chan struct{}, maxParallelChecks)
 	var wg sync.WaitGroup
 	for i, host := range blockedHosts {
 		wg.Add(1)
 		go func(i int, host string) {
 			defer wg.Done()
-			outs[i] = checkBlocked(p, withTimeout, host, proxyURL)
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			outs[i] = checkBlocked(p, withTimeout, host, proxyURL, func(r probe.Result) {
+				live("blocked", r)
+			})
 		}(i, host)
 	}
 	wg.Wait()
@@ -311,13 +417,46 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 		cancelTrace()
 	}
 	mapWG.Wait()
+	return finish(&rep, col, started, lang, nil)
+}
+
+// layerOrder — порядок слоёв прогона снизу вверх.
+var layerOrder = []string{"gateway", "dns", "runet", "global", "blocked"}
+
+// skipFrom помечает непроверенными все слои начиная с указанного и объявляет
+// их фронту, чтобы цепочка не осталась висеть на «идёт проверка».
+func skipFrom(first string, report func(string)) []verdict.LayerStatus {
+	var out []verdict.LayerStatus
+	seen := false
+	for _, l := range layerOrder {
+		if l == first {
+			seen = true
+		}
+		if !seen {
+			continue
+		}
+		out = append(out, verdict.LayerStatus{Layer: l, Status: probe.StatusSkip})
+		report(l)
+	}
+	return out
+}
+
+// finish — общий хвост прогона: непроверенные слои, вердикт, длительность.
+// skipped непустой значит, что прогон оборван раньше времени.
+func finish(rep *Report, col *collector, started time.Time, lang i18n.Lang, skipped []verdict.LayerStatus) Report {
+	if len(skipped) > 0 {
+		rep.Layers = append(rep.Layers, skipped...)
+		rep.Aborted = true
+	}
 	rep.Results = col.results
-	rep.Verdict = verdict.Build(lang, verdict.Input{Env: snap, Layers: rep.Layers, Services: rep.Services})
+	rep.Verdict = verdict.Build(lang, verdict.Input{
+		Env: rep.Env, Layers: rep.Layers, Services: rep.Services, Captive: rep.Captive,
+	})
 	rep.Duration = time.Since(started)
 	if rep.Duration <= 0 {
 		rep.Duration = time.Nanosecond
 	}
-	return rep
+	return *rep
 }
 
 // maxParallelTraces — сколько маршрутов трассировать одновременно.
@@ -379,9 +518,12 @@ func traceRoutes(ctx context.Context, p Prober, outs []blockedOutcome) []geo.Rou
 }
 
 // checkZone — HTTPS до каждой цели зоны; зона жива, если жива хотя бы одна.
-func checkZone(p Prober, col *collector, withTimeout func() (context.Context, context.CancelFunc), hosts []string) probe.Status {
+// Пустой список целей — не «зона в порядке», а «нечего было спрашивать»:
+// такую зону вердикт обязан считать непроверенной, а не работающей.
+func checkZone(p Prober, col *collector, withTimeout func() (context.Context, context.CancelFunc),
+	hosts []string, layer string, live func(string, ...probe.Result)) probe.Status {
 	if len(hosts) == 0 {
-		return probe.StatusOK
+		return probe.StatusSkip
 	}
 	results := make([]probe.Result, len(hosts))
 	var wg sync.WaitGroup
@@ -392,6 +534,7 @@ func checkZone(p Prober, col *collector, withTimeout func() (context.Context, co
 			c, cancel := withTimeout()
 			defer cancel()
 			results[i] = p.HTTPGet(c, "https://"+h, nil)
+			live(layer, results[i])
 		}(i, h)
 	}
 	wg.Wait()
@@ -405,21 +548,28 @@ func checkZone(p Prober, col *collector, withTimeout func() (context.Context, co
 }
 
 // checkBlocked собирает улики по одной блокируемой цели и ставит диагноз.
-func checkBlocked(p Prober, withTimeout func() (context.Context, context.CancelFunc), host string, proxyURL *url.URL) blockedOutcome {
+func checkBlocked(p Prober, withTimeout func() (context.Context, context.CancelFunc), host string,
+	proxyURL *url.URL, live func(probe.Result)) blockedOutcome {
 	var out blockedOutcome
 	ev := analyze.Evidence{Host: host}
+	// keep — улику в отчёт и сразу же на экран: цели проверяются параллельно,
+	// и ждать конца всего слоя, чтобы показать первую строку, незачем.
+	keep := func(r probe.Result) {
+		out.res = append(out.res, r)
+		live(r)
+	}
 
 	c, cancel := withTimeout()
 	sysRes := p.ResolveSystem(c, host)
 	cancel()
-	out.res = append(out.res, sysRes)
+	keep(sysRes)
 	ev.SysIPs = sysRes.IPs
 
 	for _, ep := range dohEndpoints {
 		c, cancel := withTimeout()
 		dohRes := p.ResolveDoH(c, host, ep)
 		cancel()
-		out.res = append(out.res, dohRes)
+		keep(dohRes)
 		if dohRes.Status == probe.StatusOK {
 			ev.DoHIPs = dohRes.IPs
 			break
@@ -438,7 +588,7 @@ func checkBlocked(p Prober, withTimeout func() (context.Context, context.CancelF
 		c, cancel := withTimeout()
 		r := p.TCPConnect(c, net.JoinHostPort(ip, "443"))
 		cancel()
-		out.res = append(out.res, r)
+		keep(r)
 		ev.TCP = append(ev.TCP, r)
 		if r.Status == probe.StatusOK {
 			liveIP = ip
@@ -450,7 +600,7 @@ func checkBlocked(p Prober, withTimeout func() (context.Context, context.CancelF
 	// Ни один адрес не отвечает — дальше мерить нечего, и четыре лишних
 	// таймаута ничего не добавят к уже доказанному.
 	if liveIP == "" {
-		out.sv = verdict.ServiceVerdict{Host: host, Cause: analyze.Diagnose(ev)}
+		out.sv = verdict.ServiceVerdict{Host: host, Cause: analyze.Diagnose(ev), ProxyTried: ev.ProxyTried}
 		return out
 	}
 
@@ -458,14 +608,14 @@ func checkBlocked(p Prober, withTimeout func() (context.Context, context.CancelF
 	c, cancel = withTimeout()
 	ev.TLSReal = p.TLSHandshake(c, ipPort, host)
 	cancel()
-	out.res = append(out.res, ev.TLSReal)
+	keep(ev.TLSReal)
 
 	if ev.TLSReal.Status == probe.StatusFail {
 		for _, sni := range neutralSNIs {
 			c, cancel := withTimeout()
 			r := p.TLSHandshake(c, ipPort, sni)
 			cancel()
-			out.res = append(out.res, r)
+			keep(r)
 			ev.TLSNeutral = append(ev.TLSNeutral, r)
 			if r.Status == probe.StatusOK {
 				break // сервер отозвался, лестницу дальше крутить незачем
@@ -473,15 +623,16 @@ func checkBlocked(p Prober, withTimeout func() (context.Context, context.CancelF
 		}
 		// Рукопожатие с настоящим именем не проходит — HTTP по нему тем более
 		// не пройдёт. Не тратим на него бюджет.
-		out.sv = verdict.ServiceVerdict{Host: host, Cause: analyze.Diagnose(ev)}
+		out.sv = verdict.ServiceVerdict{Host: host, Cause: analyze.Diagnose(ev), ProxyTried: ev.ProxyTried}
 		if proxyURL != nil {
 			ev.ProxyTried = true
 			c, cancel := withTimeout()
 			pr := p.HTTPGet(c, "https://"+host, proxyURL)
 			cancel()
-			out.res = append(out.res, pr)
+			keep(pr)
 			ev.ProxyOK = pr.Status == probe.StatusOK
 			out.sv.ProxyOK = ev.ProxyOK
+			out.sv.ProxyTried = true
 			out.sv.Cause = analyze.Diagnose(ev)
 		}
 		return out
@@ -490,7 +641,7 @@ func checkBlocked(p Prober, withTimeout func() (context.Context, context.CancelF
 	c, cancel = withTimeout()
 	ev.HTTP = p.HTTPGet(c, "https://"+host, nil)
 	cancel()
-	out.res = append(out.res, ev.HTTP)
+	keep(ev.HTTP)
 
 	directOK := ev.HTTP.Status == probe.StatusOK && !isRefusal(ev.HTTP)
 	proxyOK := false
@@ -502,13 +653,15 @@ func checkBlocked(p Prober, withTimeout func() (context.Context, context.CancelF
 		c, cancel := withTimeout()
 		pr := p.HTTPGet(c, "https://"+host, proxyURL)
 		cancel()
-		out.res = append(out.res, pr)
+		keep(pr)
 		ev.Control = &pr
 		proxyOK = pr.Status == probe.StatusOK
 		ev.ProxyOK = proxyOK
 	}
 
-	out.sv = verdict.ServiceVerdict{Host: host, DirectOK: directOK, ProxyOK: proxyOK}
+	out.sv = verdict.ServiceVerdict{
+		Host: host, DirectOK: directOK, ProxyOK: proxyOK, ProxyTried: ev.ProxyTried,
+	}
 	if !directOK {
 		out.sv.Cause = analyze.Diagnose(ev)
 	}

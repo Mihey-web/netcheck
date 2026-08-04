@@ -53,7 +53,49 @@ func Append(rec Record, keep int) error {
 	if keep > 0 && len(records) > keep {
 		records = records[:keep]
 	}
+	return writeRecords(records)
+}
 
+// Delete убирает прогоны с указанным временем (RFC3339). Неизвестное время
+// молча игнорируется: удалять уже удалённое — не ошибка.
+func Delete(ats []string) error {
+	if len(ats) == 0 {
+		return nil
+	}
+	want := make(map[int64]bool, len(ats))
+	for _, s := range ats {
+		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			want[t.UnixNano()] = true
+		}
+	}
+	records, err := loadRecords()
+	if err != nil {
+		return err
+	}
+	kept := records[:0]
+	for _, r := range records {
+		if !want[r.At.UnixNano()] {
+			kept = append(kept, r)
+		}
+	}
+	return writeRecords(kept)
+}
+
+// Clear стирает историю целиком вместе с сохранёнными отчётами.
+func Clear() error {
+	p, err := path()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// writeRecords перезаписывает файл целиком: формат — по строке JSON
+// на прогон, дописывать частями тут нечего.
+func writeRecords(records []Record) error {
 	p, err := path()
 	if err != nil {
 		return err
@@ -179,13 +221,24 @@ func Summarize(r runner.Report, l i18n.Lang) Entry {
 		}
 	}
 
-	summary := strings.Join(r.Verdict.Lines, " ")
+	// Сводка — первая строка вердикта, а не список упавших сервисов вместо неё.
+	// Раньше прогон без интернета подписывался «блокировки: youtube.com, …»,
+	// хотя никаких блокировок никто не измерял: измерять было нечем.
+	summary := ""
+	if len(r.Verdict.Lines) > 0 {
+		summary = r.Verdict.Lines[0]
+	}
 	if len(broken) > 0 {
-		label := "блокировки"
+		label := "не открываются"
 		if l == i18n.EN {
-			label = "blocked"
+			label = "down"
 		}
-		summary = label + ": " + strings.Join(broken, ", ")
+		tail := label + ": " + strings.Join(broken, ", ")
+		if summary == "" {
+			summary = tail
+		} else {
+			summary += " " + tail
+		}
 	}
 	if summary == "" {
 		summary = string(worst)

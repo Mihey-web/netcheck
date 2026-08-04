@@ -9,7 +9,11 @@ export function ApplyWindowScale():Promise<void>;
 
 export function Catalog():Promise<Array<catalog.Item>>;
 
+export function ClearHistory():Promise<void>;
+
 export function CurrentLang():Promise<string>;
+
+export function DeleteRuns(arg1:Array<string>):Promise<void>;
 
 export function FontCSS():Promise<string>;
 

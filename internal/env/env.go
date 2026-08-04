@@ -46,10 +46,11 @@ func Detect(ctx context.Context, proxyPorts []int) Snapshot {
 		}
 	}
 	for _, p := range proxyPorts {
-		select {
-		case <-ctx.Done():
+		// break внутри select выходил из select, а не из цикла: отмена
+		// контекста перебор портов не останавливала, и он честно выстаивал
+		// свои 300 мс на каждом.
+		if ctx.Err() != nil {
 			break
-		default:
 		}
 		if proto, ok := classifyListener(p); ok {
 			s.Proxies = append(s.Proxies, ProxyHint{

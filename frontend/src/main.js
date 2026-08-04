@@ -1,7 +1,7 @@
 import './style.css';
 import {RunCheck, GetHistory, GetRun, GetConfig, SaveConfig, CurrentLang, SetLang, Version,
   ListFonts, FontCSS, ApplyWindowScale, Catalog, Presets, SetServices,
-  SetTab as saveTab} from '../wailsjs/go/main/App';
+  DeleteRuns, ClearHistory, SetTab as saveTab} from '../wailsjs/go/main/App';
 import {EventsOn} from '../wailsjs/runtime/runtime';
 import {t, pl, applyLang, getLang} from './i18n';
 import {WorldMap} from './worldmap';
@@ -26,7 +26,18 @@ const state = {
   picked: new Set(),  // выбранные идентификаторы
   custom: [],         // {host, group}[] — цели, добавленные руками
   svcQuery: '',       // фильтр в поиске по сервисам
+  // ── живая таблица ──
+  // live — результаты в порядке прихода вместе со слоем, который назвал
+  // бэкенд. Он знает слой точно, поэтому для свежего прогона фронтовая
+  // догадка classifyResults не нужна вовсе.
+  live: [],           // {layer, r}[]
+  liveFor: '',        // какому прогону принадлежит live (startedAt)
+  stick: true,        // держаться низа таблицы при добавлении строк
 };
+
+// group — состояние текущей группы строк в живой таблице: её слой, первая
+// строка (на ней подпись слоя и подсветка) и худший статус внутри.
+let group = {layer: null, tr: null, worst: 'ok'};
 
 /* ──────────────── утилиты ──────────────── */
 
@@ -72,7 +83,13 @@ const stCell = s => s === 'ok' ? 'ok' : s === 'warn' ? 'warn' : s === 'skip' ? '
 
 /* ──────────────── классификация результат→слой ──────────────── */
 
-function classifyResults(results) {
+// makeClassifier — догадка «какому слою принадлежит результат» для отчётов,
+// прочитанных из истории: в них слой не сохранён. У свежего прогона слой
+// приходит с бэкенда, и сюда дело не доходит.
+//
+// Состояние (seenDNS) живёт внутри одного классификатора, поэтому его нельзя
+// звать по одному результату из общей функции — только через свой экземпляр.
+function makeClassifier() {
   const cfg = state.cfg || {};
   const tg = cfg.Targets || {};
   const runet = new Set(tg.Runet || []);
@@ -83,25 +100,30 @@ function classifyResults(results) {
   // первые DNS/DoH-ответы по контрольному хосту принадлежат слою DNS,
   // повторные (в рамках проверки блокировок) — слою сервисов
   const seenDNS = {'DNS': false, 'DNS·DoH': false};
-  const buckets = {gateway: [], dns: [], runet: [], global: [], blocked: []};
 
-  for (const r of results || []) {
+  return r => {
     const m = r.method || '';
-    let layer = 'blocked';
-    if (m === 'ping') {
-      layer = (r.target === globalIP) ? 'global' : 'gateway';
-    } else if (m.startsWith('DNS')) {
-      if (m === 'DNS·UDP') layer = 'dns';
-      else if (r.target === dnsProbe && !seenDNS[m]) { seenDNS[m] = true; layer = 'dns'; }
-      else layer = 'blocked';
-    } else if (m === 'HTTPS' || m === 'HTTP') {
-      const h = hostOf(r.target);
-      if (runet.has(h)) layer = 'runet';
-      else if (glob.has(h)) layer = 'global';
-      else layer = 'blocked';
+    if (m === 'ping') return (r.target === globalIP) ? 'global' : 'gateway';
+    if (m.startsWith('DNS')) {
+      if (m === 'DNS·UDP') return 'dns';
+      if (r.target === dnsProbe && !seenDNS[m]) { seenDNS[m] = true; return 'dns'; }
+      return 'blocked';
     }
-    buckets[layer].push(r);
-  }
+    if (m === 'HTTPS' || m === 'HTTP') {
+      const h = hostOf(r.target);
+      if (runet.has(h)) return 'runet';
+      if (glob.has(h)) return 'global';
+    }
+    // контрольный SYN до опорного адреса — это проверка связности, а не сервис
+    if (m.startsWith('TCP:') && String(r.target).split(':')[0] === globalIP) return 'gateway';
+    return 'blocked';
+  };
+}
+
+function classifyResults(results) {
+  const cls = makeClassifier();
+  const buckets = {gateway: [], dns: [], runet: [], global: [], blocked: []};
+  for (const r of results || []) buckets[cls(r)].push(r);
   return buckets;
 }
 
@@ -250,76 +272,163 @@ function renderVerdict() {
   vw.innerHTML = warns.map(w => `<div class="vnote">⚠ ${esc(w)}</div>`).join('');
 }
 
-function renderTable() {
+// worseOf — худший из двух статусов; им красится вся группа слоя.
+const worseOf = (a, b) =>
+  a === 'fail' || b === 'fail' ? 'fail' : (a === 'warn' || b === 'warn' ? 'warn' : 'ok');
+
+const layerName = l => l === 'blocked' ? t('tlayer.blocked') : t('layer.' + l);
+
+// rowHTML — одна строка результата без подписи слоя: подпись живёт
+// на первой строке группы и проставляется отдельно.
+function rowHTML(r) {
+  const tgt = esc(r.method === 'HTTPS' || r.method === 'HTTP' ? hostOf(r.target) : r.target);
+  const isProxy = r.path === 'proxy';
+  const pathTxt = esc(isProxy ? t('path.proxy') : t('path.direct'));
+  const stc = stCell(r.status);
+  let why = '';
+  if (r.detail) why = esc(r.detail);
+  else if (r.ips && r.ips.length) why = esc(r.ips.join(', '));
+  return `<td class="layer"></td>` +
+    `<td class="tgt">${tgt}</td>` +
+    `<td class="mth">${esc(r.method)}</td>` +
+    `<td class="${isProxy ? 'path px' : 'path'}">${pathTxt}</td>` +
+    `<td class="ms">${fmtDur(r.latency)}</td>` +
+    `<td class="res"><span class="st ${stc}">${stc.toUpperCase()}</span>` +
+    (why ? ` <span class="why">${why}</span>` : '') + `</td>`;
+}
+
+// appendRow — дописывает строку в конец таблицы, заводя новую группу, когда
+// сменился слой. Ровно этим таблица и заполняется по ходу прогона.
+function appendRow(layer, r) {
   const tb = $('tbody');
-  const meta = $('tests-meta');
+  const empty = tb.querySelector('.empty-cell');
+  if (empty) tb.innerHTML = '';
+
+  const tr = document.createElement('tr');
+  tr.innerHTML = rowHTML(r);
+  if (layer !== group.layer) {
+    group = {layer, tr, worst: 'ok'};
+    tr.classList.add('grp');
+    tr.firstElementChild.textContent = layerName(layer);
+  }
+  tb.appendChild(tr);
+
+  const worst = worseOf(group.worst, r.status === 'skip' ? 'ok' : r.status);
+  if (worst !== group.worst && group.tr) {
+    group.worst = worst;
+    group.tr.classList.toggle('badgrp', worst === 'fail');
+    group.tr.classList.toggle('warngrp', worst === 'warn');
+  }
+}
+
+// stickBottom — таблица едет за новыми строками, но только пока пользователь
+// сам не отлистал вверх: драться с ним за прокрутку она не должна.
+function stickBottom() {
+  const bd = $('tbody').closest('.bd');
+  if (!bd || !state.stick) return;
+  bd.scrollTop = bd.scrollHeight;
+}
+
+function tableMeta(total, layers) {
+  $('tests-meta').textContent =
+    `${total} ${pl(total, 'cnt.checks')} · ${layers} ${pl(layers, 'cnt.layers')}`;
+}
+
+// clearTable — таблица без данных: заглушка и пустая мета.
+function clearTable(msg) {
+  group = {layer: null, tr: null, worst: 'ok'};
+  $('tbody').innerHTML = `<tr><td colspan="6" class="empty-cell">${esc(msg)}</td></tr>`;
+  $('tests-meta').textContent = '';
+}
+
+function renderTable() {
   const rep = state.report;
+  if (state.running) return; // во время прогона таблицу ведёт appendRow
   if (!rep || !rep.results || !rep.results.length) {
-    tb.innerHTML = `<tr><td colspan="6" class="empty-cell">${esc(t('table.empty'))}</td></tr>`;
-    meta.textContent = '';
+    clearTable(t('table.empty'));
     return;
   }
 
-  const buckets = classifyResults(rep.results);
-  let rows = '';
-  let total = 0, layerCount = 0;
-
-  for (const layer of LAYERS) {
-    const group = buckets[layer];
-    if (!group.length) continue;
-    layerCount++;
-    const worst = group.reduce((w, r) =>
-      r.status === 'fail' ? 'fail' : (r.status === 'warn' && w !== 'fail' ? 'warn' : w), 'ok');
-    const grpCls = worst === 'fail' ? ' badgrp' : worst === 'warn' ? ' warngrp' : '';
-
-    group.forEach((r, i) => {
-      total++;
-      const layerName = i === 0
-        ? esc(layer === 'blocked' ? t('tlayer.blocked') : t('layer.' + layer))
-        : '';
-      const trCls = i === 0 ? ` class="grp${grpCls}"` : '';
-      const tgt = esc(r.method === 'HTTPS' || r.method === 'HTTP' ? hostOf(r.target) : r.target);
-      const isProxy = r.path === 'proxy';
-      const pathCls = isProxy ? 'path px' : 'path';
-      const pathTxt = esc(isProxy ? t('path.proxy') : t('path.direct'));
-      const stc = stCell(r.status);
-      let why = '';
-      if (r.detail) why = esc(r.detail);
-      else if (r.ips && r.ips.length) why = esc(r.ips.join(', '));
-      rows +=
-        `<tr${trCls}>` +
-        `<td class="layer">${layerName}</td>` +
-        `<td class="tgt">${tgt}</td>` +
-        `<td class="mth">${esc(r.method)}</td>` +
-        `<td class="${pathCls}">${pathTxt}</td>` +
-        `<td class="ms">${fmtDur(r.latency)}</td>` +
-        `<td class="res"><span class="st ${stc}">${stc.toUpperCase()}</span>` +
-        (why ? ` <span class="why">${why}</span>` : '') +
-        `</td></tr>`;
-    });
+  // У свежего прогона слои известны точно — берём их, а не догадку по методу.
+  // Заодно строки остаются на тех же местах, где их видел человек во время
+  // прогона: пересборка в конце ничего не переставляет.
+  let rows = state.live;
+  if (!sameRun(state.liveFor, rep.startedAt) || state.live.length !== rep.results.length) {
+    const buckets = classifyResults(rep.results);
+    rows = LAYERS.flatMap(l => buckets[l].map(r => ({layer: l, r})));
   }
 
-  tb.innerHTML = rows;
-  meta.textContent = `${total} ${pl(total, 'cnt.checks')} · ${layerCount} ${pl(layerCount, 'cnt.layers')}`;
+  group = {layer: null, tr: null, worst: 'ok'};
+  $('tbody').innerHTML = '';
+  const seen = new Set();
+  for (const {layer, r} of rows) { seen.add(layer); appendRow(layer, r); }
+  tableMeta(rows.length, seen.size);
 }
 
 function renderHistory() {
   const bd = $('hist-body');
   const h = state.history || [];
+  const panel = bd.closest('.hist');
+  if (panel) panel.classList.toggle('busy', state.running);
+  $('hist-clear').classList.toggle('hidden', !h.length);
   if (!h.length) {
     bd.innerHTML = `<div class="empty">${esc(t('hist.empty'))}</div>`;
     return;
   }
+  const tip = state.running ? t('hist.busy') : t('hist.open');
   bd.innerHTML = h.map(e => {
     const cls = stChip(e.status);
     const sel = sameRun(e.at, state.selectedAt) ? ' cur' : '';
-    return `<div class="hrow ${cls}${sel}" data-at="${esc(e.at)}" title="${esc(t('hist.open'))}">` +
+    return `<div class="hrow ${cls}${sel}" data-at="${esc(e.at)}" title="${esc(tip)}">` +
       `<span class="t">${esc(fmtWhen(e.at))}</span>` +
-      `<span class="s">${esc(e.summary || '')}</span></div>`;
+      `<span class="s">${esc(e.summary || '')}</span>` +
+      `<button class="hdel" title="${esc(t('hist.del'))}">✕</button></div>`;
   }).join('');
   bd.querySelectorAll('.hrow').forEach(row => {
     row.addEventListener('click', () => { if (!state.running) loadRun(row.dataset.at); });
+    row.querySelector('.hdel').addEventListener('click', e => {
+      e.stopPropagation(); // иначе удаление заодно откроет удаляемый прогон
+      if (!state.running) removeRuns([row.dataset.at]);
+    });
   });
+}
+
+// removeRuns — удаление прогонов: выбранных поимённо либо (пустой список)
+// всей истории целиком. Открытый на экране прогон, если он удалён, уходит
+// вместе с записью — показывать отчёт, которого больше нет, нечестно.
+async function removeRuns(ats) {
+  try {
+    if (ats === null) await ClearHistory();
+    else await DeleteRuns(ats);
+  } catch (e) {
+    console.error(e);
+    state.error = t('hist.err');
+  }
+  try { state.history = await GetHistory() || []; } catch (e) { console.error(e); }
+  const gone = ats === null || ats.some(at => sameRun(at, state.selectedAt));
+  if (gone) {
+    state.report = null;
+    state.selectedAt = '';
+    state.live = [];
+    state.liveFor = '';
+  }
+  renderAll();
+}
+
+// Подтверждение прямо на кнопке: второй клик по «Точно?» стирает историю.
+// Модалка ради одного вопроса — лишняя, а спрашивать надо: отменить нельзя.
+let clearArmed = false;
+
+function armClear(on) {
+  clearArmed = on;
+  const b = $('hist-clear');
+  b.classList.toggle('armed', on);
+  b.textContent = on
+    ? t('hist.confirm.ok') + ' ' + (state.history || []).length
+    : t('hist.clear');
+  b.title = on ? t('hist.confirm.all').replace('%n',
+    `${(state.history || []).length} ${pl((state.history || []).length, 'cnt.runs')}`)
+    : t('hist.clear.title');
 }
 
 function updateButton() {
@@ -327,9 +436,10 @@ function updateButton() {
   btn.disabled = state.running;
   $('btn-label').textContent = state.running ? t('btn.running') : t('btn.run');
   const last = (state.history || [])[0];
-  $('btn-sub').textContent = last
-    ? `${t('btn.lastrun')} — ${fmtWhen(last.at)} · ${fmtDur(last.duration)}`
-    : t('btn.norun');
+  $('btn-sub').textContent = state.running
+    ? t('btn.sub.running')
+    : (last ? `${t('btn.lastrun')} — ${fmtWhen(last.at)} · ${fmtDur(last.duration)}`
+            : t('btn.norun'));
 }
 
 function updateSubline() {
@@ -612,20 +722,38 @@ function renderAll() {
 
 /* ──────────────── прогон ──────────────── */
 
+// resetRunUI — экран под новый прогон: старые данные уходят целиком, чтобы
+// на них нельзя было смотреть как на свежие. Окружение не трогаем — оно
+// придёт событием через долю секунды, и мигать прочерками ни к чему.
+function resetRunUI() {
+  state.report = null;
+  state.selectedAt = '';
+  state.doneLayers = new Set();
+  state.live = [];
+  state.liveFor = '';
+  state.stick = true;
+  state.error = null;
+  group = {layer: null, tr: null, worst: 'ok'};
+
+  clearTable(t('table.running'));
+  updateButton();
+  renderChain();
+  renderVerdict();   // он же чистит счётчик и метку времени
+  renderHistory();   // снимаем подсветку прошлого прогона
+  renderMap();       // лучи и сводка прошлого прогона тоже не наши
+}
+
 async function run() {
   if (state.running) return;
   state.running = true;
-  state.error = null;
-  state.doneLayers = new Set();
-  updateButton();
-  renderChain();
-  renderVerdict();
+  resetRunUI();
 
   try {
     const rep = await RunCheck();
     state.report = rep;
     if (rep && rep.env) state.env = rep.env;
     state.selectedAt = (rep && rep.startedAt) || '';
+    state.liveFor = (rep && rep.startedAt) || '';
   } catch (e) {
     state.error = (e && e.message) ? e.message : String(e);
   }
@@ -719,6 +847,8 @@ async function loadRun(at) {
     state.report = rep;
     if (rep.env) state.env = rep.env;
     state.selectedAt = rep.startedAt || at || '';
+    // прогон из истории — свои живые строки к нему не относятся
+    if (!sameRun(state.liveFor, rep.startedAt)) { state.live = []; state.liveFor = ''; }
     renderAll();
     return true;
   } catch (e) {
@@ -746,7 +876,17 @@ async function switchLang(l) {
 async function init() {
   EventsOn('env', snap => { state.env = snap; renderEnv(); });
   EventsOn('progress', p => {
-    if (p && p.layer) { state.doneLayers.add(p.layer); if (state.running) renderChain(); }
+    if (!p || !p.layer) return;
+    if (p.result) {
+      // очередная проба ответила — строка уходит в таблицу немедленно
+      if (!state.running) return;
+      state.live.push({layer: p.layer, r: p.result});
+      appendRow(p.layer, p.result);
+      tableMeta(state.live.length, new Set(state.live.map(x => x.layer)).size);
+      stickBottom();
+      return;
+    }
+    if (p.done) { state.doneLayers.add(p.layer); if (state.running) renderChain(); }
   });
 
   let lang = 'ru';
@@ -769,6 +909,22 @@ async function init() {
   await loadRun('');
 
   $('btn-run').addEventListener('click', run);
+
+  // автопрокрутка живой таблицы держится, пока человек не отлистал вверх
+  const tbd = $('tbody').closest('.bd');
+  if (tbd) {
+    tbd.addEventListener('scroll', () => {
+      state.stick = tbd.scrollHeight - tbd.scrollTop - tbd.clientHeight < 24;
+    });
+  }
+
+  $('hist-clear').addEventListener('click', () => {
+    if (state.running || !(state.history || []).length) return;
+    if (!clearArmed) { armClear(true); return; }
+    armClear(false);
+    removeRuns(null);
+  });
+  $('hist-clear').addEventListener('blur', () => { if (clearArmed) armClear(false); });
 
   for (const name of TABS) $('tab-' + name).addEventListener('click', () => setTab(name));
 
