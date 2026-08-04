@@ -20,6 +20,13 @@ jobs:
         with:
           node-version: "20"
 
+      # go:embed all:frontend/dist требует, чтобы каталог существовал уже
+      # на этапе компиляции, а в чистом клоне его нет: dist не хранится
+      # в репозитории. Без этого шага падает даже `go vet`.
+      - name: Build frontend
+        working-directory: frontend
+        run: npm ci && npm run build
+
       - name: Vet
         run: go vet ./...
 

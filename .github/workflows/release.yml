@@ -22,6 +22,13 @@ jobs:
         with:
           node-version: "20"
 
+      # go:embed all:frontend/dist требует, чтобы каталог существовал уже
+      # на этапе компиляции тестов, а в чистом клоне его нет: dist не хранится
+      # в репозитории. Без этого шага падает даже `go test`.
+      - name: Build frontend
+        working-directory: frontend
+        run: npm ci && npm run build
+
       - name: Test
         run: go test ./...
 
