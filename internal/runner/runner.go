@@ -23,9 +23,13 @@ import (
 
 // DoH-эндпоинты: сначала Cloudflare, при неудаче Google
 // (из РФ cloudflare-dns.com бывает придушен).
+// Адреса, а не имена: чтобы сходить в cloudflare-dns.com, пришлось бы
+// сначала отрезолвить его — системным резолвером, ровно тем, который DoH
+// и должен обойти. Независимый путь падал вместе с зависимым, и мёртвый
+// DNS выглядел как мёртвая сеть. У обоих адресов есть IP в сертификате.
 var dohEndpoints = []string{
-	"https://cloudflare-dns.com/dns-query",
-	"https://dns.google/dns-query",
+	"https://1.1.1.1/dns-query",
+	"https://8.8.8.8/dns-query",
 }
 
 // Лестница нейтральных имён для контрольного рукопожатия: ими проверяем,
@@ -47,7 +51,7 @@ type Prober interface {
 	ResolveDoH(ctx context.Context, host, doh string) probe.Result
 	TCPConnect(ctx context.Context, ipPort string) probe.Result
 	TLSHandshake(ctx context.Context, ipPort, sni string) probe.Result
-	HTTPGet(ctx context.Context, rawURL string, proxy *url.URL) probe.Result
+	HTTPGet(ctx context.Context, rawURL string, proxy *url.URL, pinIP string) probe.Result
 	Trace(ctx context.Context, ip string) ([]probe.Hop, error)
 }
 
@@ -70,8 +74,8 @@ func (Live) TCPConnect(ctx context.Context, ipPort string) probe.Result {
 func (Live) TLSHandshake(ctx context.Context, ipPort, sni string) probe.Result {
 	return probe.TLSHandshake(ctx, ipPort, sni)
 }
-func (Live) HTTPGet(ctx context.Context, rawURL string, proxy *url.URL) probe.Result {
-	return probe.HTTPGet(ctx, rawURL, proxy)
+func (Live) HTTPGet(ctx context.Context, rawURL string, proxy *url.URL, pinIP string) probe.Result {
+	return probe.HTTPGet(ctx, rawURL, proxy, pinIP)
 }
 func (Live) Trace(ctx context.Context, ip string) ([]probe.Hop, error) {
 	return probe.Trace(ctx, ip)
@@ -114,6 +118,13 @@ func captiveKind(r probe.Result) string {
 		return "" // никто не ответил — связи нет вовсе
 	case r.Code == 200 && strings.Contains(r.Body, captiveBody):
 		return captiveOpen
+	case r.Code >= 400:
+		// Ошибка от самого адресата (или от корпоративного прокси) — это
+		// не страница входа. Советовать «откройте браузер и авторизуйтесь»
+		// там, где авторизовываться негде, хуже, чем промолчать.
+		return ""
+	case r.Code >= 300 && probe.SameSite("www.msftconnecttest.com", r.Location):
+		return captiveOpen // штатный редирект внутри того же сайта
 	default:
 		return captivePortal
 	}
@@ -254,7 +265,11 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 	}
 
 	// ── слой 2: DNS тремя путями ─────────────────────────────────
-	dnsProbe := firstOr(cfg.Targets.Blocked, "youtube.com")
+	// Контрольное имя фиксированное, а не первое из пользовательского списка.
+	// Опечатка в своей цели или домен, которого больше нет, честно давали
+	// отказ по всем трём путям — и прогон обрывался с диагнозом «интернета
+	// нет» на совершенно здоровой сети.
+	dnsProbe := "cloudflare.com"
 	var sysIPs []string
 	dnsStatus := probe.StatusOK
 	{
@@ -310,11 +325,21 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 			ctrl := p.TCPConnect(c, net.JoinHostPort(cfg.Ping.GlobalIP, "443"))
 			cancelProbe()
 			add("dns", ctrl)
+			// Одного якоря мало: 1.1.1.1 режут и провайдеры, и корпоративные
+			// сети, а прямой 443 наружу в корпоративке закрыт по определению.
+			// Обрываем прогон, только если молчит ещё и обычный HTTP.
 			if ctrl.Status != probe.StatusOK {
-				rep.Captive = captiveDead
-				rep.Layers = append(rep.Layers, verdict.LayerStatus{Layer: "dns", Status: dnsStatus})
-				report("dns")
-				return finish(&rep, col, started, lang, skipFrom("runet", report))
+				c, cancelProbe := withTimeout()
+				alt := p.HTTPGet(c, captiveURL, nil, "")
+				cancelProbe()
+				add("dns", alt)
+				rep.Captive = captiveKind(alt)
+				if alt.Code == 0 {
+					rep.Captive = captiveDead
+					rep.Layers = append(rep.Layers, verdict.LayerStatus{Layer: "dns", Status: dnsStatus})
+					report("dns")
+					return finish(&rep, col, started, lang, skipFrom("runet", report))
+				}
 			}
 		}
 	}
@@ -338,9 +363,14 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 	// оборванную связь от публичного Wi-Fi, который держит нас на странице
 	// входа, и от сети, где режут именно HTTPS.
 	deadEnd := runetStatus == probe.StatusFail && globalStatus == probe.StatusFail
-	if deadEnd {
+	// Спрашиваем шире, чем обрываем: контрольный запрос нужен всякий раз,
+	// когда ни одна зона не открылась по-настоящему, — в том числе когда
+	// сайты отвечают отказом. Именно так выглядит страница входа в публичный
+	// Wi-Fi: она отвечает на всё, но ни один сайт не открывается.
+	zonesChecked := runetStatus != probe.StatusSkip || globalStatus != probe.StatusSkip
+	if zonesChecked && runetStatus != probe.StatusOK && globalStatus != probe.StatusOK {
 		c, cancelProbe := withTimeout()
-		ctrl := p.HTTPGet(c, captiveURL, nil)
+		ctrl := p.HTTPGet(c, captiveURL, nil, "")
 		cancelProbe()
 		add("global", ctrl)
 		rep.Captive = captiveKind(ctrl)
@@ -397,7 +427,12 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 	}
 	wg.Wait()
 
-	blockedStatus := probe.StatusOK
+	// Пустой список — «не проверяли», а не «всё в порядке»: зелёная галочка
+	// на непроведённой проверке ничем не лучше выдуманного диагноза.
+	blockedStatus := probe.StatusSkip
+	if len(outs) > 0 {
+		blockedStatus = probe.StatusOK
+	}
 	for _, o := range outs {
 		col.add(o.res...)
 		rep.Services = append(rep.Services, o.sv)
@@ -408,15 +443,17 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 	rep.Layers = append(rep.Layers, verdict.LayerStatus{Layer: "blocked", Status: blockedStatus})
 	report("blocked")
 
+	// Ждём геолокацию до трассировок: её координаты — точка отсчёта, от которой
+	// считается, успел бы свет до очередного шага или база опять соврала.
+	mapWG.Wait()
 	if cfg.Map.Enabled {
 		// Трассировкам нужен свой бюджет, а не остаток общего: они идут
 		// последними, и если проверки съели всё время, карта оказалась бы
 		// пустой — причём без объяснения, что времени просто не хватило.
 		traceCtx, cancelTrace := context.WithTimeout(ctx, traceBudget)
-		rep.Routes = traceRoutes(traceCtx, p, outs)
+		rep.Routes = traceRoutes(traceCtx, p, outs, rep.GeoDirect)
 		cancelTrace()
 	}
-	mapWG.Wait()
 	return finish(&rep, col, started, lang, nil)
 }
 
@@ -473,7 +510,7 @@ const traceBudget = 6 * time.Second
 // Трассируются все цели, а не только упавшие: работающий сервис на карте
 // нужен не меньше — по нему видно, докуда путь проходит нормально, и с чем
 // сравнивать оборвавшийся.
-func traceRoutes(ctx context.Context, p Prober, outs []blockedOutcome) []geo.Route {
+func traceRoutes(ctx context.Context, p Prober, outs []blockedOutcome, direct *geo.Info) []geo.Route {
 	db, err := data.Load()
 	if err != nil {
 		// Без базы луч всё равно рисуется — просто без подписей,
@@ -503,7 +540,7 @@ func traceRoutes(ctx context.Context, p Prober, outs []blockedOutcome) []geo.Rou
 				}
 				return
 			}
-			routes[i] = geo.BuildRoute(host, ip, hops, db, serviceOK)
+			routes[i] = geo.BuildRoute(host, ip, hops, db, serviceOK, direct)
 		}(i, o.sv.Host, o.traceIP, o.sv.DirectOK)
 	}
 	wg.Wait()
@@ -533,16 +570,30 @@ func checkZone(p Prober, col *collector, withTimeout func() (context.Context, co
 			defer wg.Done()
 			c, cancel := withTimeout()
 			defer cancel()
-			results[i] = p.HTTPGet(c, "https://"+h, nil)
+			results[i] = p.HTTPGet(c, "https://"+h, nil, "")
 			live(layer, results[i])
 		}(i, h)
 	}
 	wg.Wait()
 	col.add(results...)
-	for _, r := range results {
-		if r.Status == probe.StatusOK {
+
+	// Зона жива, если хоть один сайт по-настоящему открылся. Отказ по коду
+	// (403 от Сбербанка под VPN, 429 от антибота) — это не «связи нет»:
+	// сервер ответил, дошли. Такая зона получает warn, и прогон продолжается.
+	// Прежде любой 403 делал зону мёртвой, а два таких — обрывали проверку
+	// сервисов вердиктом «интернета нет» на рабочей сети.
+	answered := false
+	for i, r := range results {
+		if r.Outcome == probe.OutOK {
+			answered = true
+		}
+		if r.Status == probe.StatusOK &&
+			(r.Code < 300 || probe.SameSite(hosts[i], r.Location)) {
 			return probe.StatusOK
 		}
+	}
+	if answered {
+		return probe.StatusWarn
 	}
 	return probe.StatusFail
 }
@@ -563,13 +614,14 @@ func checkBlocked(p Prober, withTimeout func() (context.Context, context.CancelF
 	sysRes := p.ResolveSystem(c, host)
 	cancel()
 	keep(sysRes)
-	ev.SysIPs = sysRes.IPs
+	ev.SysIPs, ev.SysOutcome = sysRes.IPs, sysRes.Outcome
 
 	for _, ep := range dohEndpoints {
 		c, cancel := withTimeout()
 		dohRes := p.ResolveDoH(c, host, ep)
 		cancel()
 		keep(dohRes)
+		ev.DoHOutcome = dohRes.Outcome
 		if dohRes.Status == probe.StatusOK {
 			ev.DoHIPs = dohRes.IPs
 			break
@@ -627,7 +679,7 @@ func checkBlocked(p Prober, withTimeout func() (context.Context, context.CancelF
 		if proxyURL != nil {
 			ev.ProxyTried = true
 			c, cancel := withTimeout()
-			pr := p.HTTPGet(c, "https://"+host, proxyURL)
+			pr := p.HTTPGet(c, "https://"+host, proxyURL, "")
 			cancel()
 			keep(pr)
 			ev.ProxyOK = pr.Status == probe.StatusOK
@@ -639,11 +691,15 @@ func checkBlocked(p Prober, withTimeout func() (context.Context, context.CancelF
 	}
 
 	c, cancel = withTimeout()
-	ev.HTTP = p.HTTPGet(c, "https://"+host, nil)
+	ev.HTTP = p.HTTPGet(c, "https://"+host, nil, liveIP)
 	cancel()
 	keep(ev.HTTP)
 
-	directOK := ev.HTTP.Status == probe.StatusOK && !isRefusal(ev.HTTP)
+	// Редирект на чужой домен успехом не считается: именно так выглядит
+	// заглушка провайдера. Прежде она проходила как «сервис работает»,
+	// и разбор заглушек в analyze оставался мёртвым кодом.
+	directOK := ev.HTTP.Status == probe.StatusOK && !isRefusal(ev.HTTP) &&
+		(ev.HTTP.Code < 300 || probe.SameSite(host, ev.HTTP.Location))
 	proxyOK := false
 	// Контрольный замер через прокси — не роскошь, а единственный способ
 	// отличить геоблок от антибота: тот же 403 из другой страны означает
@@ -651,7 +707,7 @@ func checkBlocked(p Prober, withTimeout func() (context.Context, context.CancelF
 	if proxyURL != nil {
 		ev.ProxyTried = true
 		c, cancel := withTimeout()
-		pr := p.HTTPGet(c, "https://"+host, proxyURL)
+		pr := p.HTTPGet(c, "https://"+host, proxyURL, "")
 		cancel()
 		keep(pr)
 		ev.Control = &pr

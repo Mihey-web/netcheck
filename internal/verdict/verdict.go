@@ -127,9 +127,12 @@ func Build(l i18n.Lang, in Input) Verdict {
 		v.Lines = append(v.Lines, i18n.T(l, "verdict.http_only"))
 	case dead:
 		v.Lines = append(v.Lines, i18n.T(l, "verdict.no_internet"))
-	case global == probe.StatusFail && runet == probe.StatusOK:
+	// Skip рядом с Fail означает «второй зоны не выбрано», а не «всё хорошо»:
+	// раньше такая пара проваливалась в default и выдавала «проверять было
+	// нечего» человеку, у которого цели выбраны и как раз не открылись.
+	case global == probe.StatusFail && runet != probe.StatusFail:
 		v.Lines = append(v.Lines, i18n.T(l, "verdict.global_down"))
-	case runet == probe.StatusFail && global == probe.StatusOK:
+	case runet == probe.StatusFail && global != probe.StatusFail:
 		if viaVPN(in.Env) {
 			v.Lines = append(v.Lines, i18n.T(l, "verdict.runet_down_vpn"))
 		} else {
@@ -188,15 +191,16 @@ func Build(l i18n.Lang, in Input) Verdict {
 	// «Не находится ни одним резолвером» про десяток доменов разом — это
 	// не диагноз, а самоопровержение: столько доменов одновременно не исчезает.
 	// Значит, спрашивать было нечем, и честно сказать именно это.
-	if len(groups[analyze.CauseNXDomain]) > 2 {
+	if len(groups[analyze.CauseNXDomain])+len(groups[analyze.CauseDNSSilent]) > 2 {
 		delete(groups, analyze.CauseNXDomain)
+		delete(groups, analyze.CauseDNSSilent)
 		v.Lines = append(v.Lines, i18n.T(l, "svc.dns_unreachable"))
 	}
 	// порядок — от самого конкретного диагноза к самому расплывчатому
 	order := []analyze.Cause{analyze.CauseDPI, analyze.CauseIPBlock, analyze.CauseDNSSpoof,
 		analyze.CauseMITM, analyze.CauseStub, analyze.CauseGeoBlock, analyze.CauseAntibot,
 		analyze.CauseDown, analyze.CauseHTTPDrop, analyze.CauseNXDomain,
-		analyze.CauseStateful, analyze.CauseUnknown}
+		analyze.CauseDNSSilent, analyze.CauseStateful, analyze.CauseUnknown}
 	var parts []string
 	for _, c := range order {
 		if hosts := groups[c]; len(hosts) > 0 {

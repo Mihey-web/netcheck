@@ -77,7 +77,12 @@ func Trace(ctx context.Context, ip string) ([]Hop, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return TrimHops(hops), nil
+	hops = TrimHops(hops)
+	// Имена роутеров спрашиваем один раз на весь маршрут и уже после
+	// трассировки: на замеры они не влияют, но именно по ним потом
+	// определяется, где роутер стоит на самом деле.
+	FillHostnames(ctx, hops)
+	return hops, nil
 }
 
 func probeTTL(target uint32, ttl uint8, timeout time.Duration) Hop {

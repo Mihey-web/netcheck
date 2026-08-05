@@ -29,7 +29,7 @@ func (offlineProber) ResolveDoH(ctx context.Context, host, doh string) probe.Res
 func (offlineProber) TCPConnect(ctx context.Context, ipPort string) probe.Result {
 	return probe.Result{Target: ipPort, Method: "TCP:443", Status: probe.StatusFail, Outcome: probe.OutTimeout}
 }
-func (offlineProber) HTTPGet(ctx context.Context, rawURL string, proxy *url.URL) probe.Result {
+func (offlineProber) HTTPGet(ctx context.Context, rawURL string, proxy *url.URL, pinIP string) probe.Result {
 	return probe.Result{Target: rawURL, Method: "HTTPS", Status: probe.StatusFail, Outcome: probe.OutTimeout}
 }
 
@@ -68,7 +68,7 @@ func TestRunStopsWhenNothingLeavesTheRouter(t *testing.T) {
 // HTTP-запрос возвращает чужую страницу вместо ожидаемого ответа.
 type portalProber struct{ fakeProber }
 
-func (portalProber) HTTPGet(ctx context.Context, rawURL string, proxy *url.URL) probe.Result {
+func (portalProber) HTTPGet(ctx context.Context, rawURL string, proxy *url.URL, pinIP string) probe.Result {
 	if strings.HasPrefix(rawURL, "http://") {
 		return probe.Result{Target: rawURL, Method: "HTTP", Status: probe.StatusOK,
 			Outcome: probe.OutOK, Code: 200, Body: "<html>Wi-Fi login required</html>"}

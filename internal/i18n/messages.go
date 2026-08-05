@@ -123,8 +123,12 @@ var messages = map[string]map[Lang]string{
 		EN: "%s goes silent after connecting — looks blocked, but the trigger couldn't be identified",
 	},
 	"svc.blocked.dns_nxdomain": {
-		RU: "%s не находится ни одним резолвером — возможно, домен больше не существует",
-		EN: "%s resolves nowhere — the domain may no longer exist",
+		RU: "%s: резолверы отвечают, что такого имени нет — возможно, домен больше не существует",
+		EN: "%s: the resolvers answer that no such name exists — the domain may no longer exist",
+	},
+	"svc.blocked.dns_silent": {
+		RU: "%s: имя не удалось выяснить — резолверы не ответили, спрашивать было нечем",
+		EN: "%s: the name couldn't be resolved — the resolvers stayed silent, there was nothing to ask",
 	},
 	"svc.blocked.unknown": {
 		RU: "%s недоступен, причина не определена",

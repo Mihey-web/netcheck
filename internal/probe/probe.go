@@ -39,6 +39,18 @@ const (
 	OutTLSAlert Outcome = "tlsalert" // сервер ответил отказом на уровне TLS
 	OutEOF      Outcome = "eof"      // соединение закрыто без ответа
 	OutDNSFail  Outcome = "dnsfail"
+	// OutUnreach — сеть ответила «маршрута нет». Это не вмешательство:
+	// молчание означает, что пакет ушёл и не вернулся, а unreachable —
+	// что его отказались нести. Диагнозы у этих двух разные.
+	OutUnreach Outcome = "unreachable"
+	// OutInjected — на порт 443 в ответ пришёл не-TLS. Так выглядит вброс
+	// постороннего ответа по пути, а не отказ сервера.
+	OutInjected Outcome = "injected"
+	// Ответы резолвера: «имени нет» и «резолвер молчит» — разные факты,
+	// и путать их нельзя, иначе мёртвая сеть выглядит как исчезнувший домен.
+	OutNXDomain Outcome = "nxdomain" // авторитетный ответ: такого имени нет
+	OutNoData   Outcome = "nodata"   // имя есть, но A-записей у него нет
+	OutServFail Outcome = "servfail" // резолвер ответил отказом
 	OutOther    Outcome = "other"
 )
 

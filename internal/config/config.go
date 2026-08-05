@@ -136,11 +136,38 @@ func Load() (Config, error) {
 	}
 	c := Default() // недостающие поля остаются дефолтными
 	if err := yaml.Unmarshal(raw, &c); err != nil {
-		return Default(), err
+		// Файл цел, но не разбирается — хватит одной лишней табуляции.
+		// Откладываем его в сторону под своим именем: иначе первое же
+		// переключение языка сохранит поверх дефолты, и выбор целей,
+		// который можно было починить руками, пропадёт навсегда.
+		os.Rename(p, p+".broken")
+		d := Default()
+		d.resolveTargets()
+		return d, err
 	}
 	c.migrate(raw)
 	c.resolveTargets()
+	c.clampTimeouts()
 	return c, nil
+}
+
+// clampTimeouts защищает от значений, при которых прогон бессмысленен:
+// probe_ms: 0 в файле означал уже истёкший контекст на каждую пробу,
+// то есть мгновенный отказ по всем проверкам без единого отправленного пакета.
+func (c *Config) clampTimeouts() {
+	d := Default()
+	clamp := func(v *int, min, max, def int) {
+		switch {
+		case *v == 0:
+			*v = def
+		case *v < min:
+			*v = min
+		case *v > max:
+			*v = max
+		}
+	}
+	clamp(&c.Timeouts.ProbeMs, 500, 30000, d.Timeouts.ProbeMs)
+	clamp(&c.Timeouts.RunMs, 5000, 120000, d.Timeouts.RunMs)
 }
 
 // resolveTargets раскладывает выбранные сервисы по группам прогона.

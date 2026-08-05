@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/mihey/netcheck/internal/catalog"
@@ -18,6 +19,10 @@ import (
 // стримит прогресс, пишет историю.
 type App struct {
 	ctx context.Context
+	// busy — прогон уже идёт. Защита во фронте есть, но она снимается
+	// перезагрузкой страницы, а два прогона разом смешали бы события
+	// в одной таблице и потеряли бы одну из двух записей истории.
+	busy atomic.Bool
 }
 
 func NewApp() *App { return &App{} }
@@ -26,6 +31,11 @@ func (a *App) startup(ctx context.Context) { a.ctx = ctx }
 
 // RunCheck — полный прогон. Прогресс по слоям уходит событием "progress".
 func (a *App) RunCheck() runner.Report {
+	if !a.busy.CompareAndSwap(false, true) {
+		return runner.Report{} // прогон уже идёт
+	}
+	defer a.busy.Store(false)
+
 	cfg, _ := config.Load() // при ошибке чтения получаем дефолт
 	lang := i18n.Resolve(cfg.Lang)
 
@@ -45,7 +55,14 @@ func (a *App) RunCheck() runner.Report {
 		}
 	})
 
-	history.Append(history.Record{Entry: history.Summarize(rep, lang), Report: &rep}, cfg.HistoryKeep)
+	// Не сохранилось — надо сказать. Молча потерянный прогон после
+	// перезапуска выглядит как «результат исчез сам».
+	if err := history.Append(
+		history.Record{Entry: history.Summarize(rep, lang), Report: &rep},
+		cfg.HistoryKeep,
+	); err != nil && a.ctx != nil {
+		wr.EventsEmit(a.ctx, "hist-error", err.Error())
+	}
 	return rep
 }
 
@@ -118,9 +135,13 @@ func (a *App) Presets() map[string][]string { return catalog.Presets }
 // «Сервисы» правит только выбор и не должна тащить с собой весь конфиг,
 // который мог измениться в другом месте.
 func (a *App) SetServices(enabled []string, custom []catalog.Custom) error {
+	// Конфиг не прочитался — не сохраняем поверх него дефолты: так первое же
+	// изменение галочки стирало выбор целей, который ещё можно было починить
+	// руками. Load уже отложил битый файл в сторону, и следующая попытка
+	// пройдёт по чистому.
 	cfg, err := config.Load()
 	if err != nil {
-		cfg = config.Default()
+		return err
 	}
 	if enabled == nil {
 		enabled = []string{} // «ничего не выбрано» — это выбор, а не отсутствие настройки
@@ -173,7 +194,7 @@ func (a *App) CurrentLang() string {
 func (a *App) SetLang(l string) error {
 	cfg, err := config.Load()
 	if err != nil {
-		cfg = config.Default()
+		return err
 	}
 	cfg.Lang = l
 	return cfg.Save()

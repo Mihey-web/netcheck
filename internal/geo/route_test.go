@@ -131,7 +131,7 @@ func TestBuildRoute(t *testing.T) {
 		r := BuildRoute("instagram.com", "31.13.72.174", []probe.Hop{
 			hop(1, "192.168.1.1", 1, probe.HopOK),
 			hop(2, "198.51.100.1", 5, probe.HopOK),
-		}, db, false)
+		}, db, false, nil)
 
 		if r.Reached {
 			t.Error("маршрут считается дошедшим, хотя цель не ответила")
@@ -154,7 +154,7 @@ func TestBuildRoute(t *testing.T) {
 		r := BuildRoute("web.telegram.org", "149.154.167.99", []probe.Hop{
 			hop(1, "192.168.1.1", 1, probe.HopOK),
 			hop(2, "95.71.2.226", 9, probe.HopUnreach),
-		}, db, false)
+		}, db, false, nil)
 
 		if !strings.Contains(r.Note, "закрыт") {
 			t.Errorf("отказ описан как %q", r.Note)
@@ -168,7 +168,7 @@ func TestBuildRoute(t *testing.T) {
 		r := BuildRoute("ya.ru", "95.71.2.226", []probe.Hop{
 			hop(1, "192.168.1.1", 1, probe.HopOK),
 			hop(2, "95.71.2.226", 9, probe.HopFinal),
-		}, db, true)
+		}, db, true, nil)
 
 		if !r.Reached {
 			t.Error("маршрут дошёл, но Reached == false")
@@ -189,7 +189,7 @@ func TestBuildRoute(t *testing.T) {
 			hop(1, "192.168.1.1", 1, probe.HopOK),
 			hop(2, "198.51.100.1", 5, probe.HopOK),
 			hop(3, "104.18.32.47", 32, probe.HopFinal),
-		}, db, true)
+		}, db, true, nil)
 
 		if !r.FarCountry {
 			t.Errorf("ответ за 32 мс из США не распознан как точка присутствия: %+v", r)
@@ -205,7 +205,7 @@ func TestBuildRoute(t *testing.T) {
 			hop(1, "192.168.1.1", 1, probe.HopOK),
 			hop(2, "198.51.100.1", 5, probe.HopOK),
 			hop(3, "104.18.32.47", 140, probe.HopFinal),
-		}, db, true)
+		}, db, true, nil)
 
 		if r.FarCountry {
 			t.Error("ответ за 140 мс из США помечен как ближайшая точка присутствия")
@@ -219,7 +219,7 @@ func TestBuildRoute(t *testing.T) {
 		r := BuildRoute("netflix.com", "23.246.2.1", []probe.Hop{
 			hop(1, "192.168.1.1", 1, probe.HopOK),
 			hop(2, "198.51.100.1", 5, probe.HopOK),
-		}, db, true)
+		}, db, true, nil)
 
 		if !r.Opaque {
 			t.Error("живой сервис с недошедшей трассировкой не помечен как непрослеживаемый")
@@ -233,7 +233,7 @@ func TestBuildRoute(t *testing.T) {
 	})
 
 	t.Run("не ответил никто", func(t *testing.T) {
-		r := BuildRoute("instagram.com", "31.13.72.174", nil, db, false)
+		r := BuildRoute("instagram.com", "31.13.72.174", nil, db, false, nil)
 		if r.Break != nil {
 			t.Errorf("на пустом маршруте нашлась точка обрыва: %+v", r.Break)
 		}

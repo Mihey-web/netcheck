@@ -23,6 +23,11 @@ import (
 const BrowserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
 	"(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 
+// bodyPeek — сколько начала ответа сохраняем как улику. Подписи защиты
+// от роботов у разных площадок стоят на разной глубине, и 256 байт хватало
+// только Cloudflare.
+const bodyPeek = 4 << 10
+
 // classifyErr — КАК проба кончилась. Это ключ ко всей диагностике: молчание
 // до конца бюджета означает вмешательство по пути, а быстрый отказ — что
 // ответил сам сервер.
@@ -30,11 +35,17 @@ func classifyErr(err error) Outcome {
 	if err == nil {
 		return OutOK
 	}
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		return OutTimeout
+	// Сначала — числовой код ошибки сокета. Он не зависит ни от языка
+	// системы, ни от формулировок Go, тогда как разбор текста ниже
+	// на русской Windows не находит ничего.
+	if out, ok := platformOutcome(err); ok {
+		return out
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
+		return OutTimeout
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
 		return OutTimeout
 	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -44,9 +55,12 @@ func classifyErr(err error) Outcome {
 	if errors.As(err, &alert) {
 		return OutTLSAlert
 	}
+	// «Первая запись не похожа на TLS» означает буквально: на 443 в ответ
+	// пришло не рукопожатие. Это вброс постороннего ответа по пути, а не
+	// отказ сервера, и считать его признаком «сервер жив» нельзя.
 	var rec tls.RecordHeaderError
 	if errors.As(err, &rec) {
-		return OutTLSAlert
+		return OutInjected
 	}
 	s := strings.ToLower(err.Error())
 	switch {
@@ -56,7 +70,11 @@ func classifyErr(err error) Outcome {
 		strings.Contains(s, "forcibly closed"),
 		strings.Contains(s, "connection was aborted"):
 		return OutReset
-	case strings.Contains(s, "eof"):
+	case strings.Contains(s, "unreachable"):
+		return OutUnreach
+	// «eof» проверяется по концу строки: в сообщении есть адрес цели,
+	// и подстрока нашлась бы в любом theoffice.com.
+	case strings.HasSuffix(s, "eof"):
 		return OutEOF
 	case strings.Contains(s, "tls:"), strings.Contains(s, "handshake"):
 		return OutTLSAlert
@@ -100,7 +118,14 @@ func TLSHandshake(ctx context.Context, ipPort, sni string) Result {
 	if dl, ok := ctx.Deadline(); ok {
 		raw.SetDeadline(dl)
 	}
-	tc := tls.Client(raw, &tls.Config{ServerName: sni, InsecureSkipVerify: true})
+	// Тот же список протоколов, что предъявляет HTTP-проба. Иначе у двух
+	// проб разный отпечаток рукопожатия, а DPI умеет резать по нему —
+	// и «TLS прошёл, HTTP не прошёл» означало бы не то, что мы думаем.
+	tc := tls.Client(raw, &tls.Config{
+		ServerName:         sni,
+		InsecureSkipVerify: true,
+		NextProtos:         []string{"h2", "http/1.1"},
+	})
 	err = tc.HandshakeContext(ctx)
 	r.Latency = time.Since(start)
 	if err != nil {
@@ -148,17 +173,33 @@ func inspectCert(cs tls.ConnectionState, sni string) *CertInfo {
 
 // HTTPGet — GET без следования редиректам. proxy==nil — напрямую;
 // иначе через прокси (socks5:// и http:// понимает сам http.Transport).
-func HTTPGet(ctx context.Context, rawURL string, proxy *url.URL) Result {
+// pinIP, если задан, подставляется вместо результата резолва: улики должны
+// собираться с ОДНОГО адреса. Прежде TCP и TLS проверялись по найденному
+// живому адресу, а HTTP резолвил имя заново и у CDN уходил на другой —
+// живое рукопожатие с мёртвым запросом складывались в диагноз «режут
+// содержимое», хотя резали по IP.
+func HTTPGet(ctx context.Context, rawURL string, proxy *url.URL, pinIP string) Result {
 	start := time.Now()
-	// «HTTPS», а не «HTTP»: ходим только по https, и подпись в таблице
-	// не должна наводить на мысль, что мы стучимся в открытый порт 80
-	r := Result{Target: rawURL, Method: "HTTPS", Path: PathDirect}
+	method := "HTTPS"
+	if strings.HasPrefix(strings.ToLower(rawURL), "http://") {
+		method = "HTTP" // подписывать открытый порт 80 как HTTPS — дезинформация
+	}
+	r := Result{Target: rawURL, Method: method, Path: PathDirect}
 	if proxy != nil {
 		r.Path = PathProxy
 	}
-	tr := &http.Transport{DisableKeepAlives: true}
+	tr := &http.Transport{DisableKeepAlives: true, ForceAttemptHTTP2: true}
 	if proxy != nil {
 		tr.Proxy = http.ProxyURL(proxy)
+	} else if pinIP != "" {
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			_, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			var d net.Dialer
+			return d.DialContext(ctx, network, net.JoinHostPort(pinIP, port))
+		}
 	}
 	client := &http.Client{
 		Transport: tr,
@@ -186,13 +227,26 @@ func HTTPGet(ctx context.Context, rawURL string, proxy *url.URL) Result {
 	r.Code = resp.StatusCode
 	r.Server = resp.Header.Get("Server")
 	r.CFMitigated = resp.Header.Get("Cf-Mitigated")
-	if body, err := io.ReadAll(io.LimitReader(resp.Body, 256)); err == nil {
-		r.Body = string(body)
+	// Читаем 4 КБ, а не 256 байт: подпись защиты от роботов у не-Cloudflare
+	// (DataDome, Qrator) стоит после длинной преамбулы, и в прежнее окно
+	// не помещалась — антибот принимался за неизвестную причину.
+	body, rerr := io.ReadAll(io.LimitReader(resp.Body, bodyPeek))
+	r.Body = string(body)
+	// Обрыв на теле — почерк частичной фильтрации: заголовки пропустили,
+	// содержимое срезали. Прежде ошибка чтения молча выбрасывалась,
+	// и такой ответ засчитывался как «сайт жив».
+	if rerr != nil && !errors.Is(rerr, io.EOF) {
+		r.Outcome = classifyErr(rerr)
+		r.Status, r.Detail = StatusWarn, "тело оборвано: "+rerr.Error()
+		return r
 	}
+	// Location хранится ХОСТОМ. Прежде при относительном редиректе («/ru/»)
+	// в поле оставался путь, а analyze сравнивал его с именем сайта как
+	// с чужим доменом — и любой сайт, отдающий на «/» редирект внутрь себя,
+	// записывался в «заглушку провайдера».
 	if loc := resp.Header.Get("Location"); loc != "" {
-		r.Location = loc
-		if u, err := url.Parse(loc); err == nil && u.Host != "" {
-			r.Location = u.Host
+		if u, err := url.Parse(loc); err == nil {
+			r.Location = u.Host // пусто для относительного — так и задумано
 		}
 	}
 

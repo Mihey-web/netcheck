@@ -49,7 +49,7 @@ func (fakeProber) TLSHandshake(ctx context.Context, ipPort, sni string) probe.Re
 		Cert: &probe.CertInfo{ChainValid: true, NameMatch: true}}
 }
 
-func (fakeProber) HTTPGet(ctx context.Context, rawURL string, proxy *url.URL) probe.Result {
+func (fakeProber) HTTPGet(ctx context.Context, rawURL string, proxy *url.URL, pinIP string) probe.Result {
 	r := probe.Result{Target: rawURL, Method: "HTTPS", Status: probe.StatusOK,
 		Outcome: probe.OutOK, Code: 200, Path: probe.PathDirect}
 	if proxy != nil {

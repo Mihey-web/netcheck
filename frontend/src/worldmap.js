@@ -9,7 +9,7 @@
 // DOM-слоем поверх: так у них остаются подсказки и нормальный текст.
 
 import {geoOrthographic, geoEquirectangular, geoPath, geoGraticule10,
-  geoCentroid, geoInterpolate} from 'd3-geo';
+  geoCentroid, geoInterpolate, geoBounds} from 'd3-geo';
 import {feature} from 'topojson-client';
 import landTopo from './data/land-110m.json';
 import countriesTopo from './data/countries-110m.json';
@@ -28,32 +28,87 @@ const BY_CODE = (() => {
   const out = new Map();
   for (const [alpha2, numeric] of Object.entries(isoNumeric)) {
     const f = byId.get(String(numeric));
-    if (f) out.set(alpha2, {feature: f, at: geoCentroid(f)});
+    if (!f) continue;
+    // radiusKm — насколько далеко от центра страны может лежать её роутер.
+    // Для Нидерландов это полторы сотни километров, для России — тысячи,
+    // и без этой поправки любая проверка расстояния от центроида врала бы
+    // ровно на размер страны.
+    const [[w, s], [e, n]] = geoBounds(f);
+    const half = angularDistance([w, s], [e, n]) * Math.PI / 180 * 6371 / 2;
+    out.set(alpha2, {feature: f, at: geoCentroid(f), radiusKm: half});
   }
   return out;
 })();
 
 const placeOf = code => (code && BY_CODE.get(code)) || null;
 
+const EARTH_KM = 6371;
+const kmBetween = (a, b) => angularDistance(a, b) * Math.PI / 180 * EARTH_KM;
+
+// reachableKm — насколько далеко физически может стоять машина, ответившая
+// за rtt мс. Тот же расчёт, что в geo.ReachableKm на бэкенде: свет в волокне
+// идёт около 200 км/мс, ответ проходит путь дважды.
+const reachableKm = rtt => (rtt > 0 ? rtt / 2 * 200 : 0);
+
 // waypoints — во что превращается маршрут на карте.
 //
-// Шаги внутри одной страны сливаются в одну точку. Точность бесплатных
-// геобаз — страна, и рисовать десять отметок по России только потому,
-// что там десять роутеров, значило бы изображать знание, которого нет.
+// Точка шага берётся из трёх источников по убыванию достоверности:
+//
+//   1. Координаты города из имени роутера (n.at) — их ставит бэкенд, разобрав
+//      обратную DNS-запись. Это единственный источник, который знает, где
+//      железо стоит физически.
+//   2. Центроид страны из геобазы — грубо, но лучше, чем ничего.
+//   3. Ничего: шаг не рисуется.
+//
+// Шаги, для которых бэкенд доказал невозможность (n.implausible), выброшены
+// им же. Здесь остаётся проверить лишь те, что размещены по стране: центроид
+// отстоит от настоящего роутера на полстраны, поэтому к бюджету добавляется
+// радиус страны — иначе Германия с 35 мс отбраковывалась бы у пользователя
+// в Москве только потому, что центроид России лежит в Сибири.
 function waypoints(route) {
   const out = [];
   const end = route.break;
+  const anchor = route.anchor ? [route.anchor.lon, route.anchor.lat] : null;
+
   for (const n of route.nodes || []) {
-    if (n.private || !n.country) continue;
+    if (n.private || n.implausible) continue;
     // Ответ пришёл слишком быстро, чтобы «далёкая» страна была правдой:
     // отвечает ближайшая точка присутствия, а не сервер там, где адрес
     // числится. Ставить отметку в той стране нельзя.
     if (route.farCountry && end && n.n === end.n) continue;
-    const pl = placeOf(n.country);
-    if (!pl) continue;
+
+    let at = null, code = n.country, feature = null, exact = false;
+    if (n.at) {
+      at = [n.at.lon, n.at.lat];
+      exact = true;
+      code = n.city || n.country;
+    } else if (n.country) {
+      const pl = placeOf(n.country);
+      if (!pl) continue;
+      at = pl.at;
+      feature = pl.feature;
+      if (anchor && n.rttMs > 0 &&
+          kmBetween(anchor, at) - pl.radiusKm > reachableKm(n.rttMs)) continue;
+    }
+    if (!at) continue;
+    if (!feature && n.country) feature = (placeOf(n.country) || {}).feature || null;
+
     const prev = out[out.length - 1];
-    if (prev && prev.code === n.country) { prev.node = n; continue; }
-    out.push({code: n.country, at: pl.at, feature: pl.feature, node: n});
+    // Соседние шаги в одном месте — одна точка. Десять роутеров одного
+    // Франкфурта не десять отметок, а один Франкфурт.
+    if (prev && (prev.code === code || kmBetween(prev.at, at) < 120)) {
+      prev.node = n;
+      continue;
+    }
+    // Возврат туда, где уже были, схлопывается только для грубых, страновых
+    // точек: «Германия → Британия → Германия» у Telia — это ошибка базы,
+    // а не крюк. Для точек, установленных по имени роутера, возврат может
+    // быть настоящим, и выбрасывать его нельзя.
+    if (!exact) {
+      const seen = out.findIndex(w => !w.exact && w.code === code);
+      if (seen >= 0) { out.length = seen + 1; out[seen].node = n; continue; }
+    }
+    out.push({code, at, feature, node: n, exact});
   }
   return out;
 }
@@ -344,7 +399,10 @@ export class WorldMap {
       for (let i = 1; i < wps.length; i++) {
         // Пунктиром — только последний участок оборвавшегося маршрута:
         // до него путь проходил нормально, и это видно.
-        const dashed = !r.reached && i === wps.length - 1;
+        // Пунктиром отмечается последний участок и у оборвавшегося маршрута,
+        // и у дошедшего до заблокированного сервиса: в обоих случаях дальше
+        // этой точки ничего не работает, хотя причины разные.
+        const dashed = (!r.reached || r.serviceOK === false) && i === wps.length - 1;
         ctx.setLineDash(dashed ? [4, 4] : []);
         // Пунктир обрыва красный, пунктир непрослеживаемого маршрута —
         // нейтральный: там ничего не сломано, просто не видно.
@@ -390,7 +448,13 @@ export class WorldMap {
       const wps = waypoints(r);
       const last = wps[wps.length - 1];
       if (!last) continue;
-      const kind = r.opaque ? 'dim' : !r.reached ? 'break' : r.farCountry ? 'pop' : 'ok';
+      // Порядок важен: «пакеты дошли, а сервис не работает» — это блокировка,
+      // и назвать её «маршрут дошёл» значило бы противоречить отчёту,
+      // где тот же сервис помечен недоступным.
+      const kind = r.opaque ? 'dim'
+        : !r.reached ? 'break'
+        : r.serviceOK === false ? 'blocked'
+        : r.farCountry ? 'pop' : 'ok';
       const key = last.code + '|' + kind;
       let g = ends.get(key);
       if (!g) {
@@ -428,6 +492,7 @@ export class WorldMap {
       mark.className = g.kind === 'break' ? 'mx'
         : g.kind === 'pop' ? 'mpop'
         : g.kind === 'dim' ? 'mdim'
+        : g.kind === 'blocked' ? 'mdot bad'
         : 'mdot ok';
       mark.title = [
         `${labels[g.kind] || g.kind}: ${owner}`,

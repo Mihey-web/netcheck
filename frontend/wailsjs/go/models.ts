@@ -258,6 +258,20 @@ export namespace geo {
 	        this.viaProxy = source["viaProxy"];
 	    }
 	}
+	export class LatLon {
+	    lat: number;
+	    lon: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new LatLon(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.lat = source["lat"];
+	        this.lon = source["lon"];
+	    }
+	}
 	export class Node {
 	    n: number;
 	    ip: string;
@@ -267,6 +281,10 @@ export namespace geo {
 	    asn?: number;
 	    org?: string;
 	    private: boolean;
+	    host?: string;
+	    city?: string;
+	    at?: LatLon;
+	    implausible?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Node(source);
@@ -282,7 +300,29 @@ export namespace geo {
 	        this.asn = source["asn"];
 	        this.org = source["org"];
 	        this.private = source["private"];
+	        this.host = source["host"];
+	        this.city = source["city"];
+	        this.at = this.convertValues(source["at"], LatLon);
+	        this.implausible = source["implausible"];
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class Route {
 	    host: string;
@@ -295,6 +335,7 @@ export namespace geo {
 	    serviceOK: boolean;
 	    opaque: boolean;
 	    note?: string;
+	    anchor?: LatLon;
 	
 	    static createFrom(source: any = {}) {
 	        return new Route(source);
@@ -312,6 +353,7 @@ export namespace geo {
 	        this.serviceOK = source["serviceOK"];
 	        this.opaque = source["opaque"];
 	        this.note = source["note"];
+	        this.anchor = this.convertValues(source["anchor"], LatLon);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -472,6 +514,7 @@ export namespace runner {
 	    services: verdict.ServiceVerdict[];
 	    verdict: verdict.Verdict;
 	    aborted?: boolean;
+	    captive?: string;
 	    routes?: geo.Route[];
 	    geoDirect?: geo.Info;
 	    geoProxy?: geo.Info;
@@ -490,6 +533,7 @@ export namespace runner {
 	        this.services = this.convertValues(source["services"], verdict.ServiceVerdict);
 	        this.verdict = this.convertValues(source["verdict"], verdict.Verdict);
 	        this.aborted = source["aborted"];
+	        this.captive = source["captive"];
 	        this.routes = this.convertValues(source["routes"], geo.Route);
 	        this.geoDirect = this.convertValues(source["geoDirect"], geo.Info);
 	        this.geoProxy = this.convertValues(source["geoProxy"], geo.Info);
@@ -536,6 +580,7 @@ export namespace verdict {
 	    host: string;
 	    directOk: boolean;
 	    proxyOk: boolean;
+	    proxyTried?: boolean;
 	    cause: string;
 	
 	    static createFrom(source: any = {}) {
@@ -547,6 +592,7 @@ export namespace verdict {
 	        this.host = source["host"];
 	        this.directOk = source["directOk"];
 	        this.proxyOk = source["proxyOk"];
+	        this.proxyTried = source["proxyTried"];
 	        this.cause = source["cause"];
 	    }
 	}

@@ -113,6 +113,7 @@ main{flex:1 1 auto;min-height:0;display:grid;gap:10px;padding:10px 12px 12px;
 .hrow.warn{border-left-color:var(--warn)}
 .hrow.bad{border-left-color:var(--serious)}
 .hrow.crit{border-left-color:var(--crit)}
+.hrow.skip{border-left-color:var(--muted)}
 .hrow.cur{background:rgba(95,217,245,.10);box-shadow:inset 0 0 0 1px rgba(95,217,245,.35)}
 .hrow.cur .t::after{content:'◄';margin-left:6px;font-size:8px;color:var(--hud)}
 /* крестик удаления: выезжает по наведению, чтобы ряд крестиков не шумел */
@@ -249,6 +250,7 @@ td.res{width:44%;max-width:0;overflow:hidden;text-overflow:ellipsis}
 .st.ok{color:var(--good)}
 .st.warn{color:var(--warn)}
 .st.fail{color:var(--crit)}
+.st.skip{color:var(--muted)}
 td.res .why{color:var(--ink-2)}
 td.res .why em{font-style:normal;color:var(--muted)}
 td.empty-cell{padding:14px 12px;color:var(--muted);white-space:normal}

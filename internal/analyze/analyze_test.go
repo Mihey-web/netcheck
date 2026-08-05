@@ -142,9 +142,19 @@ func TestDiagnose(t *testing.T) {
 			want: CauseHTTPDrop,
 		},
 		{
-			name: "имя не резолвится нигде",
-			ev:   Evidence{Host: "nope.invalid"},
+			name: "резолверы ответили, что имени нет",
+			ev: Evidence{Host: "nope.invalid",
+				SysOutcome: probe.OutNXDomain, DoHOutcome: probe.OutNXDomain},
 			want: CauseNXDomain,
+		},
+		{
+			// Молчание резолвера — не доказательство, что домена нет.
+			// Ровно на этом месте программа хоронила два десятка живых
+			// сервисов, стоило пропасть интернету.
+			name: "резолверы промолчали",
+			ev: Evidence{Host: "youtube.com",
+				SysOutcome: probe.OutTimeout, DoHOutcome: probe.OutTimeout},
+			want: CauseDNSSilent,
 		},
 	}
 	for _, c := range cases {

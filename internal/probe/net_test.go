@@ -135,7 +135,7 @@ func TestHTTPGetSameSiteRedirectIsOK(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res := HTTPGet(context.Background(), srv.URL, nil)
+	res := HTTPGet(context.Background(), srv.URL, nil, "")
 	if res.Status != StatusOK {
 		t.Fatalf("same-site redirect must be ok, got %s (%s)", res.Status, res.Detail)
 	}
@@ -152,13 +152,13 @@ func TestHTTPGetOKAndRedirect(t *testing.T) {
 	defer redirSrv.Close()
 
 	ctx := context.Background()
-	res := HTTPGet(ctx, okSrv.URL, nil)
+	res := HTTPGet(ctx, okSrv.URL, nil, "")
 	if res.Status != StatusOK {
 		t.Fatalf("200: want ok, got %s (%s)", res.Status, res.Detail)
 	}
 	// HTTPGet диагнозов не ставит: редирект — это «сайт жив и куда-то ведёт».
 	// Заглушка это провайдера или штатный SSO, решает analyze по Location.
-	res = HTTPGet(ctx, redirSrv.URL, nil)
+	res = HTTPGet(ctx, redirSrv.URL, nil, "")
 	if res.Status != StatusOK {
 		t.Fatalf("302: want ok, got %s (%s)", res.Status, res.Detail)
 	}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mihey/netcheck/internal/config"
@@ -44,6 +45,9 @@ func path() (string, error) {
 
 // Append дописывает запись и оставляет keep самых свежих.
 func Append(rec Record, keep int) error {
+	mu.Lock()
+	defer mu.Unlock()
+
 	records, err := loadRecords()
 	if err != nil {
 		return err
@@ -62,6 +66,9 @@ func Delete(ats []string) error {
 	if len(ats) == 0 {
 		return nil
 	}
+	mu.Lock()
+	defer mu.Unlock()
+
 	want := make(map[int64]bool, len(ats))
 	for _, s := range ats {
 		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
@@ -83,6 +90,9 @@ func Delete(ats []string) error {
 
 // Clear стирает историю целиком вместе с сохранёнными отчётами.
 func Clear() error {
+	mu.Lock()
+	defer mu.Unlock()
+
 	p, err := path()
 	if err != nil {
 		return err
@@ -93,8 +103,17 @@ func Clear() error {
 	return nil
 }
 
+// mu — история читается и переписывается целиком, поэтому две операции
+// одновременно затирают друг друга: удалённая запись возвращалась, а прогон,
+// сохранённый параллельно с удалением, пропадал.
+var mu sync.Mutex
+
 // writeRecords перезаписывает файл целиком: формат — по строке JSON
 // на прогон, дописывать частями тут нечего.
+//
+// Пишем во временный файл рядом и переименовываем поверх. Прямая запись
+// сначала обнуляла файл и только потом заполняла его заново: выключение
+// питания в этот момент стоило бы не одной записи, а всей истории.
 func writeRecords(records []Record) error {
 	p, err := path()
 	if err != nil {
@@ -109,7 +128,16 @@ func writeRecords(records []Record) error {
 		sb.Write(raw)
 		sb.WriteByte('\n')
 	}
-	return os.WriteFile(p, []byte(sb.String()), 0o644)
+
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, []byte(sb.String()), 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // LoadLocalized — список прогонов с итогами, пересобранными на языке lang.

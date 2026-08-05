@@ -19,6 +19,15 @@ type Node struct {
 	Org     string          `json:"org,omitempty"`
 	// Private — адрес из домашней сети. Не «неизвестная страна», а «своя».
 	Private bool `json:"private"`
+	// Host/City/At — где роутер стоит на самом деле, по его имени.
+	// Надёжнее страны из базы: имя ставит оператор для себя, а страну
+	// в базе — регистратор блока адресов, и у магистралей это разные вещи.
+	Host string  `json:"host,omitempty"`
+	City string  `json:"city,omitempty"`
+	At   *LatLon `json:"at,omitempty"`
+	// Implausible — за измеренное время сюда не успел бы даже свет.
+	// Значит, база ошиблась, и рисовать такой шаг на карте нельзя.
+	Implausible bool `json:"implausible,omitempty"`
 }
 
 // Route — луч от пользователя до места, где путь кончился.
@@ -48,6 +57,10 @@ type Route struct {
 	// иначе карта противоречила бы отчёту на той же странице.
 	Opaque bool   `json:"opaque"`
 	Note   string `json:"note,omitempty"`
+	// Anchor — точка, от которой считалась достижимость. Карта берёт её же,
+	// когда судит шаги, размещённые лишь по стране: два разных критерия
+	// одного и того же расходились бы, и отчёт спорил бы с картой.
+	Anchor *LatLon `json:"anchor,omitempty"`
 }
 
 // nearbyRTT — порог «отвечающая машина стоит рядом». 40 мс туда-обратно —
@@ -71,6 +84,13 @@ func Annotate(hops []probe.Hop, db *ipdb.DB) []Node {
 				n.Country, n.ASN, n.Org = rec.Country, rec.ASN, rec.Org
 			}
 		}
+		// Имя роутера сильнее базы: оно даёт город, а не страну регистрации.
+		n.Host = h.Host
+		if p, ok := PlaceFromHost(h.Host); ok && !n.Private {
+			n.City = p.Name
+			at := p.At
+			n.At = &at
+		}
 		nodes = append(nodes, n)
 	}
 	return nodes
@@ -86,6 +106,48 @@ func isLocal(a netip.Addr) bool {
 	a = a.Unmap()
 	return a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() ||
 		a.IsUnspecified() || cgnat.Contains(a)
+}
+
+// Anchor — точка, от которой считается «успел бы свет или нет».
+//
+// Лучше всего — настоящие координаты пользователя (их даёт geo.Lookup).
+// Если их нет, годится первый же роутер провайдера, чьё имя выдало город:
+// он в паре десятков километров от нас. Центроид страны для этого не годится
+// категорически — у России он в Сибири, и от него до Франкфурта «не успевает
+// свет» даже тогда, когда пользователь сидит в Москве и Франкфурт у него
+// в сорока миллисекундах.
+func Anchor(nodes []Node, direct *Info) *LatLon {
+	if direct != nil && !(direct.Lat == 0 && direct.Lon == 0) {
+		return &LatLon{Lat: direct.Lat, Lon: direct.Lon}
+	}
+	for _, n := range nodes {
+		if n.At != nil {
+			at := *n.At
+			return &at
+		}
+	}
+	return nil
+}
+
+// MarkImplausible помечает шаги, до которых за измеренное время не успел бы
+// даже свет. Такой шаг — не крюк трафика, а ошибка геобазы, и на карте его
+// быть не должно.
+//
+// Без якоря и без измерения не помечается ничего: отсутствие данных — не повод
+// выбрасывать шаг.
+func MarkImplausible(nodes []Node, anchor *LatLon) {
+	if anchor == nil {
+		return
+	}
+	for i := range nodes {
+		n := &nodes[i]
+		if n.At == nil || n.RTTms <= 0 {
+			continue // судим только то, что измерено и размещено
+		}
+		if KmBetween(*anchor, *n.At) > ReachableKm(n.RTTms) {
+			n.Implausible = true
+		}
+	}
 }
 
 // HomeCountry — страна первого публичного шага. Это ответ на вопрос
@@ -106,7 +168,7 @@ func HomeCountry(nodes []Node) string {
 // половина магистральных роутеров не отвечает на ICMP, и трассировка до
 // живого сервиса регулярно не доходит. Крест в таком месте противоречил бы
 // отчёту на соседней вкладке.
-func BuildRoute(host, targetIP string, hops []probe.Hop, db *ipdb.DB, serviceOK bool) Route {
+func BuildRoute(host, targetIP string, hops []probe.Hop, db *ipdb.DB, serviceOK bool, direct *Info) Route {
 	r := Route{
 		Host:      host,
 		TargetIP:  targetIP,
@@ -116,6 +178,8 @@ func BuildRoute(host, targetIP string, hops []probe.Hop, db *ipdb.DB, serviceOK 
 	}
 	r.Opaque = serviceOK && !r.Reached
 	r.Home = HomeCountry(r.Nodes)
+	r.Anchor = Anchor(r.Nodes, direct)
+	MarkImplausible(r.Nodes, r.Anchor)
 
 	for i := len(r.Nodes) - 1; i >= 0; i-- {
 		if n := r.Nodes[i]; n.IP != "" && n.Status != probe.HopSilent {
@@ -132,13 +196,19 @@ func BuildRoute(host, targetIP string, hops []probe.Hop, db *ipdb.DB, serviceOK 
 		}
 		return r
 	}
-	r.FarCountry, r.Note = judgeEnd(*r.Break, r.Home, r.Reached, r.Opaque)
+	r.FarCountry, r.Note = judgeEnd(*r.Break, r.Home, r.Reached, r.Opaque, serviceOK)
 	return r
 }
 
 // judgeEnd объясняет словами, что означает конец луча.
-func judgeEnd(end Node, home string, reached, opaque bool) (far bool, note string) {
+func judgeEnd(end Node, home string, reached, opaque, serviceOK bool) (far bool, note string) {
 	switch {
+	case reached && !serviceOK:
+		// Пакеты доходят, а сервис не открывается — так и выглядит блокировка
+		// по имени или по содержимому. Раньше карта в этом случае рисовала
+		// зелёный луч «всё дошло» и прямо спорила с отчётом на соседней вкладке.
+		return false, fmt.Sprintf(
+			"пакеты доходят до цели (шаг %d), но сервис не отвечает — режут не маршрут, а само соединение", end.N)
 	case opaque:
 		return false, fmt.Sprintf(
 			"сервис отвечает, но маршрут дальше шага %d не прослеживается — по пути режут ICMP", end.N)

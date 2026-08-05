@@ -18,7 +18,11 @@ type Cause string
 
 const (
 	CauseDNSSpoof Cause = "dns_spoof"    // системный DNS вернул подставной адрес
-	CauseNXDomain Cause = "dns_nxdomain" // имя не резолвится нигде
+	CauseNXDomain Cause = "dns_nxdomain" // резолверы ответили: имени нет
+	// CauseDNSSilent — резолверы промолчали. Не то же самое, что NXDOMAIN:
+	// про имя мы не узнали ничего, и говорить «домена не существует»
+	// на этом основании — выдумка.
+	CauseDNSSilent Cause = "dns_silent"
 	CauseIPBlock  Cause = "ip_block"     // TCP не проходит ни к одному адресу
 	CauseDPI      Cause = "dpi_sni"      // TCP ок, рвётся именно на имени в ClientHello
 	CauseStateful Cause = "ip_block_stateful"
@@ -50,7 +54,11 @@ const fastEnough = 1000 // мс
 // Evidence — улики по одной цели.
 type Evidence struct {
 	Host           string
-	SysIPs, DoHIPs []string       // A-записи: системный резолвер vs DoH
+	SysIPs, DoHIPs []string // A-записи: системный резолвер vs DoH
+	// Чем кончился резолв. Без этого «списки пусты» неотличимо от
+	// «резолверы ответили, что имени нет», и мёртвая сеть превращалась
+	// в два десятка одновременно исчезнувших доменов.
+	SysOutcome, DoHOutcome probe.Outcome
 	TCP            []probe.Result // TCP:443 по каждому пробованному адресу
 	TLSReal        probe.Result   // TLS с настоящим SNI
 	TLSNeutral     []probe.Result // лестница нейтральных имён к тому же адресу
@@ -78,7 +86,13 @@ func Explain(ev Evidence) Verdict {
 		return Verdict{CauseDNSSpoof, ConfHigh}
 	}
 	if len(ev.SysIPs) == 0 && len(ev.DoHIPs) == 0 {
-		return Verdict{CauseNXDomain, ConfHigh}
+		// «Домена не существует» — это утверждение, и оно требует ответа
+		// резолвера, а не его молчания. Раньше молчание сходило за ответ,
+		// и на мёртвой сети программа хоронила два десятка живых сервисов.
+		if answered(ev.SysOutcome) && answered(ev.DoHOutcome) {
+			return Verdict{CauseNXDomain, ConfHigh}
+		}
+		return Verdict{CauseDNSSilent, ConfMedium}
 	}
 
 	// ── 2. IP ────────────────────────────────────────────────────
@@ -155,10 +169,24 @@ func Explain(ev Evidence) Verdict {
 	return Verdict{CauseUnknown, ConfLow}
 }
 
+// answered — резолвер именно ответил, что адреса нет, а не промолчал.
+// Только такой исход годится в доказательство «домена не существует».
+func answered(o probe.Outcome) bool {
+	return o == probe.OutNXDomain || o == probe.OutNoData
+}
+
 // interfered — отказ выглядит как вмешательство по пути, а не как ответ
-// сервера: молчание до конца бюджета либо оборванное соединение.
+// сервера: молчание до конца бюджета, оборванное соединение либо вброс
+// постороннего ответа вместо рукопожатия.
+//
+// «Маршрута нет» сюда не входит намеренно: это ответ самой сети о том,
+// что нести пакет некуда, и к блокировкам по имени отношения не имеет.
 func interfered(r probe.Result) bool {
-	return r.Outcome == probe.OutTimeout || r.Outcome == probe.OutReset
+	switch r.Outcome {
+	case probe.OutTimeout, probe.OutReset, probe.OutInjected:
+		return true
+	}
+	return false
 }
 
 // serverAnswered — хоть одно нейтральное имя получило быстрый ответ.

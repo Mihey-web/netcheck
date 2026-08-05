@@ -1,6 +1,12 @@
 package probe
 
-import "time"
+import (
+	"context"
+	"net"
+	"strings"
+	"sync"
+	"time"
+)
 
 // HopStatus — чем кончился шаг трассировки. Различать эти четыре исхода
 // важнее, чем знать RTT: молчание и явный отказ выглядят на карте
@@ -26,6 +32,44 @@ type Hop struct {
 	RTTms  int64     `json:"rttMs"`
 	Status HopStatus `json:"status"`
 	Detail string    `json:"detail,omitempty"`
+	// Host — обратная DNS-запись роутера. Единственный источник, знающий,
+	// где железо стоит на самом деле: операторы зашивают в имя код города
+	// (ffm-bb1-link.ip.twelve99.net — Франкфурт) и поддерживают эту разметку
+	// годами, потому что сами по ней ориентируются. Геобаза же знает лишь
+	// страну регистрации блока адресов, а у магистралей это регулярно
+	// другой континент.
+	Host string `json:"host,omitempty"`
+}
+
+// hostBudget — всё время на обратные запросы по маршруту. Они идут разом
+// и после трассировки, поэтому дороже этого не обходятся.
+const hostBudget = 900 * time.Millisecond
+
+// FillHostnames дописывает шагам имена роутеров.
+//
+// Неудача — обычное дело: у Google на магистральных адресах PTR-записей
+// нет вовсе. Это не ошибка, просто про такой шаг мы знаем меньше.
+func FillHostnames(ctx context.Context, hops []Hop) {
+	ctx, cancel := context.WithTimeout(ctx, hostBudget)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for i := range hops {
+		if hops[i].IP == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// каждый шаг пишет в свою ячейку — общей памяти тут нет
+			names, err := net.DefaultResolver.LookupAddr(ctx, hops[i].IP)
+			if err != nil || len(names) == 0 {
+				return
+			}
+			hops[i].Host = strings.TrimSuffix(names[0], ".")
+		}(i)
+	}
+	wg.Wait()
 }
 
 // Responded — ответил ли кто-нибудь на этом шаге.

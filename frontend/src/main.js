@@ -79,7 +79,10 @@ function hostOf(u) {
 const sameRun = (a, b) => !!a && !!b && new Date(a).getTime() === new Date(b).getTime();
 
 const stChip = s => s === 'ok' ? 'ok' : s === 'warn' ? 'warn' : s === 'skip' ? 'skip' : 'bad';
-const stCell = s => s === 'ok' ? 'ok' : s === 'warn' ? 'warn' : s === 'skip' ? 'skip' : 'fail';
+// Отсутствие статуса — это «не проверяли», а не «провал»: красить его
+// красным значило бы придумывать результат там, где его нет.
+const stCell = s => s === 'ok' ? 'ok' : s === 'warn' ? 'warn'
+  : (s === 'skip' || !s) ? 'skip' : 'fail';
 
 /* ──────────────── классификация результат→слой ──────────────── */
 
@@ -345,6 +348,13 @@ function renderTable() {
   const rep = state.report;
   if (state.running) return; // во время прогона таблицу ведёт appendRow
   if (!rep || !rep.results || !rep.results.length) {
+    // Прогон оборвался ошибкой, но часть проб успела отработать. Стирать
+    // их и писать «нет данных» — значит выбросить единственное, по чему
+    // видно, на чём именно всё встало.
+    if (state.live.length) {
+      tableMeta(state.live.length, new Set(state.live.map(x => x.layer)).size);
+      return;
+    }
     clearTable(t('table.empty'));
     return;
   }
@@ -352,11 +362,17 @@ function renderTable() {
   // У свежего прогона слои известны точно — берём их, а не догадку по методу.
   // Заодно строки остаются на тех же местах, где их видел человек во время
   // прогона: пересборка в конце ничего не переставляет.
-  let rows = state.live;
-  if (!sameRun(state.liveFor, rep.startedAt) || state.live.length !== rep.results.length) {
-    const buckets = classifyResults(rep.results);
-    rows = LAYERS.flatMap(l => buckets[l].map(r => ({layer: l, r})));
+  // Живые строки уже стоят в DOM и уже правильные — пересобирать их заново
+  // значит обнулить прокрутку ровно в момент, когда человек дочитывает
+  // последний слой. Обновляем только счётчик.
+  if (sameRun(state.liveFor, rep.startedAt) && state.live.length >= rep.results.length) {
+    tableMeta(state.live.length, new Set(state.live.map(x => x.layer)).size);
+    stickBottom();
+    return;
   }
+
+  const buckets = classifyResults(rep.results);
+  const rows = LAYERS.flatMap(l => buckets[l].map(r => ({layer: l, r})));
 
   group = {layer: null, tr: null, worst: 'ok'};
   $('tbody').innerHTML = '';
@@ -388,7 +404,7 @@ function renderHistory() {
     row.addEventListener('click', () => { if (!state.running) loadRun(row.dataset.at); });
     row.querySelector('.hdel').addEventListener('click', e => {
       e.stopPropagation(); // иначе удаление заодно откроет удаляемый прогон
-      if (!state.running) removeRuns([row.dataset.at]);
+      if (!state.running) queueHist(() => removeRuns([row.dataset.at]));
     });
   });
 }
@@ -396,7 +412,14 @@ function renderHistory() {
 // removeRuns — удаление прогонов: выбранных поимённо либо (пустой список)
 // всей истории целиком. Открытый на экране прогон, если он удалён, уходит
 // вместе с записью — показывать отчёт, которого больше нет, нечестно.
+// histOp — очередь операций над историей. Каждый клик по крестику запускал
+// свой независимый цикл «прочитать файл — изменить — записать», и два клика
+// подряд затирали друг друга: удалённая запись возвращалась.
+let histOp = Promise.resolve();
+const queueHist = fn => (histOp = histOp.then(fn, fn));
+
 async function removeRuns(ats) {
+  state.error = null;
   try {
     if (ats === null) await ClearHistory();
     else await DeleteRuns(ats);
@@ -418,9 +441,17 @@ async function removeRuns(ats) {
 // Подтверждение прямо на кнопке: второй клик по «Точно?» стирает историю.
 // Модалка ради одного вопроса — лишняя, а спрашивать надо: отменить нельзя.
 let clearArmed = false;
+let armedAt = 0;
+
+// armCooldown — сколько кнопка не принимает второй клик после взвода.
+// Без этой паузы двойной клик — обычная привычка в десктопных программах —
+// стирал всю историю за один жест: первое нажатие взводило, второе тут же
+// подтверждало, и прочитать вопрос человек не успевал.
+const armCooldown = 400;
 
 function armClear(on) {
   clearArmed = on;
+  armedAt = on ? Date.now() : 0;
   const b = $('hist-clear');
   b.classList.toggle('armed', on);
   b.textContent = on
@@ -434,6 +465,10 @@ function armClear(on) {
 function updateButton() {
   const btn = $('btn-run');
   btn.disabled = state.running;
+  // Настройки посреди прогона меняют язык и перечитывают конфиг, а это
+  // ломает состояние живой таблицы: половина строк остаётся на прежнем
+  // языке, вторая приходит на новом.
+  $('gear').disabled = state.running;
   $('btn-label').textContent = state.running ? t('btn.running') : t('btn.run');
   const last = (state.history || [])[0];
   $('btn-sub').textContent = state.running
@@ -457,6 +492,9 @@ function setTab(tab) {
     $('tab-' + name).classList.toggle('on', tab === name);
     $('view-' + name).classList.toggle('hidden', tab !== name);
   }
+  // Пока вкладка скрыта, у контейнера нулевая высота и прокрутка стоит
+  // в начале — при возврате таблица показывала бы шлюз вместо последних строк.
+  if (tab === 'report') requestAnimationFrame(stickBottom);
   // пока вкладка скрыта, у холста нулевой размер — перерисовываем при показе
   if (tab === 'map' && worldMap) requestAnimationFrame(() => worldMap.render());
   saveTab(tab).catch(e => console.error(e));
@@ -703,6 +741,7 @@ function renderMap() {
       here: t('map.geo.you'), vpn: t('map.geo.vpn'),
       break: t('map.mark.break'), pop: t('map.mark.pop'),
       ok: t('map.mark.ok'), dim: t('map.mark.dim'),
+      blocked: t('map.mark.blocked'),
     },
   });
 }
@@ -733,6 +772,7 @@ function resetRunUI() {
   state.liveFor = '';
   state.stick = true;
   state.error = null;
+  state.collecting = true;
   group = {layer: null, tr: null, worst: 'ok'};
 
   clearTable(t('table.running'));
@@ -760,6 +800,7 @@ async function run() {
   state.running = false;
 
   try { state.history = await GetHistory() || []; } catch (e) { console.error(e); }
+  state.collecting = false; // всё, что могло прийти, пришло
   renderAll();
 }
 
@@ -814,8 +855,10 @@ async function openSettings() {
 function closeSettings() { $('settings').classList.add('hidden'); }
 
 async function saveSettings() {
-  const cfg = state.cfg;
-  if (!cfg) { closeSettings(); return; }
+  // Конфиг мог не прочитаться при старте. Молча закрыть окно, выбросив всё,
+  // что человек только что выставил, — худшее из возможного: бэкенд примет
+  // и неполный конфиг, дополнив его умолчаниями.
+  const cfg = state.cfg || {};
   cfg.UI = Object.assign({}, cfg.UI, {
     Scale: $('set-scale').value,
     FontHUD: $('set-font-hud').value,
@@ -841,6 +884,9 @@ async function saveSettings() {
 // Отчёты хранятся целиком, поэтому прошлый прогон открывается как свежий:
 // бэкенд отдаёт его с вердиктом на текущем языке.
 async function loadRun(at) {
+  // Открывать прошлый прогон посреди текущего нельзя: живые строки уже
+  // в таблице, и подмена отчёта под ними сделала бы её наполовину чужой.
+  if (state.running) return false;
   try {
     const rep = await GetRun(at || '');
     if (!rep) return false;
@@ -861,6 +907,10 @@ async function loadRun(at) {
 
 async function switchLang(l) {
   if (l === getLang()) return;
+  // applyLang перепишет подписи по data-i18n, в том числе на взведённой
+  // кнопке очистки: она снова станет выглядеть как «Очистить», оставаясь
+  // взведённой, и следующий клик стёр бы историю без вопроса.
+  if (clearArmed) armClear(false);
   applyLang(l);
   try { await SetLang(l); } catch (e) { console.error(e); }
   // вердикт и итоги истории пересобираются бэкендом на новом языке
@@ -878,8 +928,11 @@ async function init() {
   EventsOn('progress', p => {
     if (!p || !p.layer) return;
     if (p.result) {
-      // очередная проба ответила — строка уходит в таблицу немедленно
-      if (!state.running) return;
+      // Очередная проба ответила — строка уходит в таблицу немедленно.
+      // Признак «собираем» держится дольше, чем «идёт прогон»: последние
+      // события успевают прийти уже после того, как RunCheck вернул отчёт,
+      // и выбрасывать их значило бы расходиться с отчётом на пару строк.
+      if (!state.collecting) return;
       state.live.push({layer: p.layer, r: p.result});
       appendRow(p.layer, p.result);
       tableMeta(state.live.length, new Set(state.live.map(x => x.layer)).size);
@@ -921,8 +974,9 @@ async function init() {
   $('hist-clear').addEventListener('click', () => {
     if (state.running || !(state.history || []).length) return;
     if (!clearArmed) { armClear(true); return; }
+    if (Date.now() - armedAt < armCooldown) return; // защита от двойного клика
     armClear(false);
-    removeRuns(null);
+    queueHist(() => removeRuns(null));
   });
   $('hist-clear').addEventListener('blur', () => { if (clearArmed) armClear(false); });
 

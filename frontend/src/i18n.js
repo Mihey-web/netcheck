@@ -152,6 +152,8 @@ export const STR = {
   'map.mark.break':  {ru: 'путь оборвался здесь', en: 'path broke here'},
   'map.mark.pop':    {ru: 'ближайшая точка присутствия', en: 'nearest point of presence'},
   'map.mark.ok':     {ru: 'маршрут дошёл', en: 'route completed'},
+  'map.mark.blocked':{ru: 'пакеты доходят, но сервис не отвечает — режут соединение, а не маршрут',
+                      en: 'packets arrive, but the service does not answer — the connection is cut, not the route'},
   'map.mark.dim':    {ru: 'сервис отвечает, но маршрут дальше не виден — режут ICMP',
                       en: 'the service answers, but the route is not traceable — ICMP is filtered'},
 
