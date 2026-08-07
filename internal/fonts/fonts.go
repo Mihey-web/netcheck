@@ -4,8 +4,10 @@
 package fonts
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,9 +46,10 @@ func ScaleFor(key string) float64 {
 	return Scales[DefaultScale]
 }
 
-// BuildCSS собирает таблицу стилей: @font-face для файла (если задан и читается)
-// плюс переменные --hudfont/--mono. Нечитаемый файл молча игнорируется —
-// приложение должно открыться в любом случае.
+// BuildCSS собирает таблицу стилей: @font-face для файла (если задан, читается
+// и действительно является шрифтом) плюс переменные --hudfont/--mono.
+// Нечитаемый или не-шрифтовый файл не применяется — приложение должно
+// открыться в любом случае; причина уходит в лог.
 func BuildCSS(ui config.UI, read ReadFunc) string {
 	if read == nil {
 		read = os.ReadFile
@@ -55,15 +58,19 @@ func BuildCSS(ui config.UI, read ReadFunc) string {
 	var sb strings.Builder
 	hud := defaultHUD
 	if fam := strings.TrimSpace(ui.FontHUD); fam != "" {
-		hud = fmt.Sprintf("'%s',%s", fam, defaultHUD)
+		hud = fmt.Sprintf("'%s',%s", escapeFamily(fam), defaultHUD)
 	}
 	mono := defaultMono
 	if fam := strings.TrimSpace(ui.FontMono); fam != "" {
-		mono = fmt.Sprintf("'%s',%s", fam, defaultMono)
+		mono = fmt.Sprintf("'%s',%s", escapeFamily(fam), defaultMono)
 	}
 
 	if path := strings.TrimSpace(ui.FontFile); path != "" {
-		if raw, err := read(path); err == nil && len(raw) > 0 {
+		if raw, err := read(path); err != nil {
+			log.Printf("fonts: файл %s не применён: %v", path, err)
+		} else if err := validateFontFile(path, raw); err != nil {
+			log.Printf("fonts: файл %s не применён: %v", path, err)
+		} else {
 			fmt.Fprintf(&sb, "@font-face{font-family:'%s';src:url(data:%s;base64,%s);font-display:swap}\n",
 				customFamily, fontMIME(path), base64.StdEncoding.EncodeToString(raw))
 			hud = fmt.Sprintf("'%s',%s", customFamily, hud)
@@ -103,6 +110,42 @@ func trimStyles(name string) string {
 		words = words[:len(words)-1]
 	}
 	return strings.Join(words, " ")
+}
+
+// escapeFamily экранирует имя семейства для CSS-строки в одинарных кавычках.
+// Имя приходит из конфига: без экранирования кавычка или бэкслеш в нём
+// разорвали бы строку и позволили бы дописать в стиль произвольный CSS.
+func escapeFamily(name string) string {
+	name = strings.ReplaceAll(name, `\`, `\\`)
+	return strings.ReplaceAll(name, `'`, `\'`)
+}
+
+// fontMagics — сигнатуры первых байтов форматов, которые мы готовы встроить:
+// TrueType, OpenType/CFF, WOFF, WOFF2 и TTC-коллекция.
+var fontMagics = [][]byte{
+	{0x00, 0x01, 0x00, 0x00}, // TrueType
+	[]byte("OTTO"),           // OpenType с CFF
+	[]byte("wOFF"),           // WOFF
+	[]byte("wOF2"),           // WOFF2
+	[]byte("ttcf"),           // TrueType Collection
+}
+
+// validateFontFile проверяет, что путь из конфига указывает на настоящий шрифт:
+// расширение из белого списка И знакомая сигнатура в начале файла. Иначе
+// BuildCSS превращается в примитив чтения произвольных файлов с диска в
+// страницу — достаточно подменить путь в конфиге.
+func validateFontFile(path string, raw []byte) error {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".ttf", ".otf", ".woff", ".woff2":
+	default:
+		return fmt.Errorf("расширение %q не похоже на шрифт", filepath.Ext(path))
+	}
+	for _, magic := range fontMagics {
+		if bytes.HasPrefix(raw, magic) {
+			return nil
+		}
+	}
+	return fmt.Errorf("содержимое не похоже на шрифт: нет известной сигнатуры")
 }
 
 func fontMIME(path string) string {

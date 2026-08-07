@@ -6,10 +6,17 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/mihey/netcheck/internal/catalog"
 	"gopkg.in/yaml.v3"
 )
+
+// mu — как в history: операции над файлом конфига не пересекаются.
+// Две параллельные Save рвали бы rename друг другу, а Load, попавший
+// между временным файлом и rename, на Windows получает Access denied —
+// файл, открытый на чтение, не даёт себя заменить.
+var mu sync.Mutex
 
 type Targets struct {
 	Runet   []string `yaml:"runet"`
@@ -122,6 +129,8 @@ func path() (string, error) {
 
 // Load читает конфиг; если файла нет — пишет дефолт и возвращает его.
 func Load() (Config, error) {
+	mu.Lock()
+	defer mu.Unlock()
 	p, err := path()
 	if err != nil {
 		return Default(), err
@@ -129,7 +138,7 @@ func Load() (Config, error) {
 	raw, err := os.ReadFile(p)
 	if errors.Is(err, os.ErrNotExist) {
 		c := Default()
-		return c, c.Save()
+		return c, c.save()
 	}
 	if err != nil {
 		return Default(), err
@@ -208,6 +217,13 @@ func (c *Config) migrate(raw []byte) {
 }
 
 func (c Config) Save() error {
+	mu.Lock()
+	defer mu.Unlock()
+	return c.save()
+}
+
+// save — запись без блокировки: для вызова из-под уже взятого mu.
+func (c Config) save() error {
 	p, err := path()
 	if err != nil {
 		return err
@@ -216,5 +232,17 @@ func (c Config) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, raw, 0o644)
+	// Пишем во временный файл рядом и переименовываем поверх (как в history):
+	// прямая запись сначала обнуляла файл и только потом заполняла заново,
+	// и выключение питания в этот момент оставляло пустой конфиг вместо настроек.
+	tmp := p + ".tmp"
+	// 0600: конфиг — личные настройки пользователя, другим учёткам он ни к чему.
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }

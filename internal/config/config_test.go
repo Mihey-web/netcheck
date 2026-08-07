@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -65,6 +66,60 @@ func TestEmptySelectionSurvivesReload(t *testing.T) {
 	}
 	if len(again.Targets.Blocked) != 0 {
 		t.Fatalf("цели должны быть пусты: %v", again.Targets.Blocked)
+	}
+}
+
+// Save обязан быть атомарным (tmp + rename, как в history): параллельные
+// записи и чтения не должны ни рвать YAML пополам, ни плодить .broken-файлы.
+// До этого прямая перезапись под гонкой оставляла читателю пустой или
+// половинный конфиг.
+func TestSaveAtomicUnderConcurrency(t *testing.T) {
+	t.Setenv("APPDATA", t.TempDir())
+	c, err := Load() // создаёт файл с дефолтами
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				if err := c.Save(); err != nil {
+					t.Errorf("Save: %v", err)
+				}
+			}
+		}()
+	}
+	for w := 0; w < 2; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				got, err := Load()
+				if err != nil {
+					t.Errorf("Load: %v", err)
+					continue
+				}
+				// clampTimeouts не даёт нулю пережить Load — ноль здесь
+				// означает, что читатель увидел недописанный файл
+				if got.Timeouts.ProbeMs == 0 {
+					t.Error("конфиг прочитался пустым посреди записи")
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	// битый YAML Load откладывает в .broken — его появление значит,
+	// что запись всё-таки порвала файл
+	d, err := Dir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(d, "config.yaml.broken")); err == nil {
+		t.Error("параллельная запись порвала конфиг: появился config.yaml.broken")
 	}
 }
 

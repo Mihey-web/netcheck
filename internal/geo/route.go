@@ -25,9 +25,18 @@ type Node struct {
 	Host string  `json:"host,omitempty"`
 	City string  `json:"city,omitempty"`
 	At   *LatLon `json:"at,omitempty"`
+	// Guessed — координата взята не из имени роутера, а по стране: главный
+	// узел связи и есть догадка. Разница принципиальная. Знание о городе
+	// можно опровергнуть замером времени; догадку — тоже, но опровергается
+	// тогда сама догадка, а не шаг, и выбрасывать надо точку, а не шаг.
+	Guessed bool `json:"guessed,omitempty"`
 	// Implausible — за измеренное время сюда не успел бы даже свет.
 	// Значит, база ошиблась, и рисовать такой шаг на карте нельзя.
 	Implausible bool `json:"implausible,omitempty"`
+	// Ambiguous — на этом шаге путь разветвляется: повторный вопрос пришёл
+	// с другого адреса. Одной точкой такой шаг не описывается, и координаты
+	// ему не ставятся вовсе.
+	Ambiguous bool `json:"ambiguous,omitempty"`
 }
 
 // Route — луч от пользователя до места, где путь кончился.
@@ -55,8 +64,16 @@ type Route struct {
 	// Opaque — маршрут не прослеживается, хотя сервис работает: где-то
 	// по пути режут ICMP. Это не обрыв, и рисовать крест здесь нельзя —
 	// иначе карта противоречила бы отчёту на той же странице.
-	Opaque bool   `json:"opaque"`
-	Note   string `json:"note,omitempty"`
+	Opaque bool `json:"opaque"`
+	// Note — готовая подпись на языке пользователя. Сам пакет geo языка
+	// не знает: он ставит только NoteID+NoteArgs, а строку из них собирает
+	// сборщик отчёта — и пересобирает при смене языка (как verdict).
+	Note string `json:"note,omitempty"`
+	// NoteID — код причины (ключ i18n), NoteArgs — его аргументы. Аргументы
+	// хранятся строками нарочно: []any после прогулки через JSON (история)
+	// превращает числа в float64, и «%d» ломался бы на старых отчётах.
+	NoteID   string   `json:"noteId,omitempty"`
+	NoteArgs []string `json:"noteArgs,omitempty"`
 	// Anchor — точка, от которой считалась достижимость. Карта берёт её же,
 	// когда судит шаги, размещённые лишь по стране: два разных критерия
 	// одного и того же расходились бы, и отчёт спорил бы с картой.
@@ -86,14 +103,39 @@ func Annotate(hops []probe.Hop, db *ipdb.DB) []Node {
 		}
 		// Имя роутера сильнее базы: оно даёт город, а не страну регистрации.
 		n.Host = h.Host
-		if p, ok := PlaceFromHost(h.Host); ok && !n.Private {
-			n.City = p.Name
-			at := p.At
-			n.At = &at
+		n.Ambiguous = h.Ambiguous
+		switch {
+		case n.Ambiguous:
+			// Шаг ответил с двух разных адресов — это два роутера, а не один.
+			// Любая точка здесь была бы выдумкой: в списке шаг остаётся,
+			// на карте его нет.
+		case n.Private:
+			// свой адрес — страны у него нет и быть не может
+		default:
+			placeNode(&n, h.Host)
 		}
 		nodes = append(nodes, n)
 	}
 	return nodes
+}
+
+// placeNode ставит шагу координату: сперва по имени роутера, затем — по
+// главному узлу связи его страны.
+func placeNode(n *Node, host string) {
+	if p, ok := PlaceFromHost(host); ok {
+		n.City = p.Name
+		at := p.At
+		n.At = &at
+		return
+	}
+	if p, ok := HubOf(n.Country); ok {
+		// Имя ничего не сказало — ставим точку в главный узел связи страны.
+		// City не заполняем: это догадка о стране, а не знание о городе,
+		// и подписывать её городом было бы враньём.
+		at := p.At
+		n.At = &at
+		n.Guessed = true
+	}
 }
 
 // cgnat — 100.64.0.0/10, адреса провайдерского NAT. Формально публичные,
@@ -116,12 +158,17 @@ func isLocal(a netip.Addr) bool {
 // категорически — у России он в Сибири, и от него до Франкфурта «не успевает
 // свет» даже тогда, когда пользователь сидит в Москве и Франкфурт у него
 // в сорока миллисекундах.
+//
+// Guessed-точки в якоря не годятся тоже: узел связи страны — догадка,
+// и якорь в Москве у жителя Владивостока заставлял MarkImplausible снимать
+// честные точки. Нет ни геолокации, ни точки из имени роутера — якоря нет:
+// отсутствие данных — не улика, и судить шаги в этом случае нечем.
 func Anchor(nodes []Node, direct *Info) *LatLon {
 	if direct != nil && !(direct.Lat == 0 && direct.Lon == 0) {
 		return &LatLon{Lat: direct.Lat, Lon: direct.Lon}
 	}
 	for _, n := range nodes {
-		if n.At != nil {
+		if n.At != nil && !n.Guessed {
 			at := *n.At
 			return &at
 		}
@@ -129,25 +176,75 @@ func Anchor(nodes []Node, direct *Info) *LatLon {
 	return nil
 }
 
-// MarkImplausible помечает шаги, до которых за измеренное время не успел бы
-// даже свет. Такой шаг — не крюк трафика, а ошибка геобазы, и на карте его
-// быть не должно.
+// legFloorMs — запас на соседний шаг. Разница времён между соседними шагами
+// мала и шумна: 53 и 54 мс дают «минус миллисекунду», из которой нельзя
+// заключить, что роутеры стоят в одной комнате. Восьми миллисекунд хватает
+// на восемьсот километров — больше, чем расстояние между соседними узлами
+// связи в Европе, и заметно меньше любого настоящего океанского перегона.
+const legFloorMs = 8
+
+// MarkImplausible разбирается, каким точкам верить.
 //
-// Без якоря и без измерения не помечается ничего: отсутствие данных — не повод
-// выбрасывать шаг.
+// Проверок две, и обе — про скорость света: за rtt/2 миллисекунд свет
+// в волокне проходит около 200 км/мс, дальше машина стоять не может.
+//
+// Первая: успел бы свет от пользователя. Вторая: успел бы он от предыдущего
+// размещённого шага за разницу времён — она ловит крюки, которых не было.
+//
+// Что делать с провалом, зависит от того, откуда взялась точка:
+//
+//   - точка из имени роутера — это знание. Провал означает, что база или имя
+//     врут, и шаг с карты снимается (Implausible);
+//   - точка по стране — это догадка. Провал означает, что неверна догадка,
+//     а не шаг: роутер провайдера в четырёх миллисекундах от Донецка
+//     совершенно нормален, неверна только отметка в Москве. Точка снимается,
+//     шаг остаётся — карта разместит его по стране, с поправкой на её размер.
+//
+// Раньше разницы не было, и первое же правило выбрасывало собственного
+// провайдера пользователя, а вместе с ним и весь маршрут: из двенадцати лучей
+// рисовались пять.
+//
+// Без якоря и без измерения не трогается ничего: отсутствие данных — не улика.
 func MarkImplausible(nodes []Node, anchor *LatLon) {
 	if anchor == nil {
 		return
 	}
+	var prev *Node // последний шаг, за точкой которого осталась сила
 	for i := range nodes {
 		n := &nodes[i]
 		if n.At == nil || n.RTTms <= 0 {
 			continue // судим только то, что измерено и размещено
 		}
-		if KmBetween(*anchor, *n.At) > ReachableKm(n.RTTms) {
+		switch {
+		case KmBetween(*anchor, *n.At) > ReachableKm(n.RTTms):
+			// свет от пользователя не успел
+		case prev != nil && n.Guessed &&
+			KmBetween(*prev.At, *n.At) > ReachableKm(max(abs(n.RTTms-prev.RTTms), legFloorMs)):
+			// Догаданная точка требует перегона, которого нет во времени.
+			// Так и выглядел «Стокгольм → Дублин → Стокгольм» на 53 мс:
+			// база числит роутер за Ирландией, а сходить туда и вернуться
+			// маршрут не успевал ни при каком раскладе. Шаг настоящий,
+			// но разместить его негде — на карте его быть не должно.
 			n.Implausible = true
+			n.At, n.Guessed = nil, false
+			continue
+		default:
+			prev = n
+			continue
 		}
+		if n.Guessed {
+			n.At, n.Guessed = nil, false
+			continue
+		}
+		n.Implausible = true
 	}
+}
+
+func abs(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // HomeCountry — страна первого публичного шага. Это ответ на вопрос
@@ -190,39 +287,55 @@ func BuildRoute(host, targetIP string, hops []probe.Hop, db *ipdb.DB, serviceOK 
 	}
 
 	if r.Break == nil {
-		r.Note = "не ответил ни один шаг маршрута"
+		r.NoteID = "map.note.no_reply"
 		if r.Opaque {
-			r.Note = "маршрут не прослеживается: ICMP режут с первого же шага, но сервис отвечает"
+			r.NoteID = "map.note.opaque_start"
 		}
 		return r
 	}
-	r.FarCountry, r.Note = judgeEnd(*r.Break, r.Home, r.Reached, r.Opaque, serviceOK)
+	r.FarCountry, r.NoteID, r.NoteArgs = judgeEnd(*r.Break, r.Home, r.Reached, r.Opaque, serviceOK, baseRTT(r.Nodes, r.Break.N))
 	return r
 }
 
-// judgeEnd объясняет словами, что означает конец луча.
-func judgeEnd(end Node, home string, reached, opaque, serviceOK bool) (far bool, note string) {
+// baseRTT — время до первого публичного шага, не считая самой цели.
+//
+// Это цена «выхода в интернет»: у VPN в TUN-режиме первый публичный шаг —
+// сам выход VPN, и его 60 мс — это туннель, а не расстояние до цели.
+// Сравнивать с порогом «рядом» надо время сверх этой базы, иначе всё,
+// что видно через туннель, казалось далёким. Сама цель за базу не годится:
+// когда, кроме неё, не ответил никто, вычитание давало бы ноль и любую цель
+// объявляло бы соседней.
+func baseRTT(nodes []Node, endN int) int64 {
+	for _, n := range nodes {
+		if !n.Private && n.RTTms > 0 && n.N != endN {
+			return n.RTTms
+		}
+	}
+	return 0
+}
+
+// judgeEnd объясняет, что означает конец луча: кодом причины и аргументами,
+// строку из которых соберёт i18n на языке пользователя.
+func judgeEnd(end Node, home string, reached, opaque, serviceOK bool, base int64) (far bool, noteID string, args []string) {
+	step := fmt.Sprint(end.N)
 	switch {
 	case reached && !serviceOK:
 		// Пакеты доходят, а сервис не открывается — так и выглядит блокировка
 		// по имени или по содержимому. Раньше карта в этом случае рисовала
 		// зелёный луч «всё дошло» и прямо спорила с отчётом на соседней вкладке.
-		return false, fmt.Sprintf(
-			"пакеты доходят до цели (шаг %d), но сервис не отвечает — режут не маршрут, а само соединение", end.N)
+		return false, "map.note.blocked_at_target", []string{step}
 	case opaque:
-		return false, fmt.Sprintf(
-			"сервис отвечает, но маршрут дальше шага %d не прослеживается — по пути режут ICMP", end.N)
+		return false, "map.note.opaque", []string{step}
 	case !reached && end.Status == probe.HopUnreach:
-		return false, fmt.Sprintf("маршрут закрыт на шаге %d: %s", end.N, describe(end))
+		return false, "map.note.closed", []string{step, describe(end)}
 	case !reached:
-		return false, fmt.Sprintf("дальше шага %d тишина, последним ответил %s", end.N, describe(end))
-	case end.Country != "" && home != "" && end.Country != home && end.RTTms > 0 && end.RTTms < nearbyRTT:
+		return false, "map.note.silence", []string{step, describe(end)}
+	case end.Country != "" && home != "" && end.Country != home && end.RTTms > 0 && end.RTTms-base < nearbyRTT:
 		// Дошли, но не туда, где цель числится. Так выглядит CDN.
-		return true, fmt.Sprintf(
-			"ответ за %d мс, хотя адрес числится за страной %s — отвечает ближайшая точка присутствия, а не сервер там",
-			end.RTTms, end.Country)
+		// Порог сравнивается со временем сверх базы: см. baseRTT.
+		return true, "map.note.far_country", []string{fmt.Sprint(end.RTTms), end.Country}
 	default:
-		return false, ""
+		return false, "", nil
 	}
 }
 

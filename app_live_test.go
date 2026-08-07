@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/mihey/netcheck/internal/i18n"
 )
 
 var itoa = strconv.Itoa
@@ -52,8 +54,12 @@ func TestLiveRun(t *testing.T) {
 		t.Fatal("прогон не дал ни одного слоя")
 	}
 	// Тест запускается с живого интернета: «интернета нет» означало бы,
-	// что диагностика снова врёт.
-	if strings.Contains(strings.Join(rep.Verdict.Lines, " "), "Интернета нет") {
-		t.Errorf("вердикт утверждает, что интернета нет, хотя прогон идёт с живой сети")
+	// что диагностика снова врёт. Язык прогона зависит от конфига,
+	// поэтому проверяем строку вердикта на обоих языках по ключу словаря.
+	joined := strings.Join(rep.Verdict.Lines, " ")
+	for _, l := range []i18n.Lang{i18n.RU, i18n.EN} {
+		if strings.Contains(joined, i18n.T(l, "verdict.no_internet")) {
+			t.Errorf("вердикт утверждает, что интернета нет, хотя прогон идёт с живой сети")
+		}
 	}
 }

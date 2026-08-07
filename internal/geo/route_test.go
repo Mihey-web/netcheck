@@ -80,6 +80,28 @@ func TestAnnotateKeepsSilent(t *testing.T) {
 	}
 }
 
+// Шаг, на котором путь разветвляется, не должен получать координату:
+// имя роутера у него от одной машины, а отвечали две разные. Именно из
+// таких склеек на карте и брались броски через полмира.
+func TestAnnotateLeavesAmbiguousUnplaced(t *testing.T) {
+	h := hop(7, "198.51.100.1", 30, probe.HopOK)
+	h.Host = "ffm-bb1-link.ip.twelve99.net" // имя даёт Франкфурт
+	h.Ambiguous = true
+
+	nodes := Annotate([]probe.Hop{h}, testDB(t))
+	n := nodes[0]
+	if !n.Ambiguous {
+		t.Error("развилка потерялась по дороге в Node")
+	}
+	if n.At != nil || n.City != "" {
+		t.Errorf("развилке поставлена точка: city=%q at=%+v", n.City, n.At)
+	}
+	// Сам шаг из списка не исчезает: в отчёте он есть, нет его только на карте.
+	if n.IP != "198.51.100.1" || n.Host == "" {
+		t.Errorf("шаг обеднён сверх нужного: %+v", n)
+	}
+}
+
 // База может не открыться — карта обязана продолжать работать,
 // просто без подписей.
 func TestAnnotateWithoutDB(t *testing.T) {
@@ -142,8 +164,13 @@ func TestBuildRoute(t *testing.T) {
 		if r.Break.Org != "Example ISP" {
 			t.Errorf("обрыв не подписан владельцем: %+v", r.Break)
 		}
-		if !strings.Contains(r.Note, "AS64500") {
-			t.Errorf("в пояснении нет автономной системы: %q", r.Note)
+		// Пояснение — код и аргументы: строку из них собирает i18n при сборке
+		// отчёта, сам geo языка не знает.
+		if r.NoteID != "map.note.silence" {
+			t.Errorf("код пояснения %q, хотели map.note.silence", r.NoteID)
+		}
+		if len(r.NoteArgs) != 2 || !strings.Contains(r.NoteArgs[1], "AS64500") {
+			t.Errorf("в аргументах пояснения нет автономной системы: %q", r.NoteArgs)
 		}
 		if r.Home != "RU" {
 			t.Errorf("Home = %q, хотели RU", r.Home)
@@ -156,11 +183,8 @@ func TestBuildRoute(t *testing.T) {
 			hop(2, "95.71.2.226", 9, probe.HopUnreach),
 		}, db, false, nil)
 
-		if !strings.Contains(r.Note, "закрыт") {
-			t.Errorf("отказ описан как %q", r.Note)
-		}
-		if strings.Contains(r.Note, "тишина") {
-			t.Errorf("отказ назван тишиной: %q", r.Note)
+		if r.NoteID != "map.note.closed" {
+			t.Errorf("отказ описан кодом %q, хотели map.note.closed", r.NoteID)
 		}
 	})
 
@@ -173,8 +197,8 @@ func TestBuildRoute(t *testing.T) {
 		if !r.Reached {
 			t.Error("маршрут дошёл, но Reached == false")
 		}
-		if r.Note != "" {
-			t.Errorf("у дошедшего маршрута появилось пояснение: %q", r.Note)
+		if r.NoteID != "" || r.Note != "" {
+			t.Errorf("у дошедшего маршрута появилось пояснение: %q %q", r.NoteID, r.Note)
 		}
 		if r.FarCountry {
 			t.Error("цель в своей же стране помечена как далёкая")
@@ -194,8 +218,11 @@ func TestBuildRoute(t *testing.T) {
 		if !r.FarCountry {
 			t.Errorf("ответ за 32 мс из США не распознан как точка присутствия: %+v", r)
 		}
-		if !strings.Contains(r.Note, "точк") {
-			t.Errorf("пояснение не про точку присутствия: %q", r.Note)
+		if r.NoteID != "map.note.far_country" {
+			t.Errorf("пояснение не про точку присутствия: %q", r.NoteID)
+		}
+		if len(r.NoteArgs) != 2 || r.NoteArgs[0] != "32" || r.NoteArgs[1] != "US" {
+			t.Errorf("аргументы пояснения: %q, хотели [32 US]", r.NoteArgs)
 		}
 	})
 
@@ -224,11 +251,8 @@ func TestBuildRoute(t *testing.T) {
 		if !r.Opaque {
 			t.Error("живой сервис с недошедшей трассировкой не помечен как непрослеживаемый")
 		}
-		if strings.Contains(r.Note, "тишина") || strings.Contains(r.Note, "закрыт") {
-			t.Errorf("непрослеживаемый маршрут описан как обрыв: %q", r.Note)
-		}
-		if !strings.Contains(r.Note, "ICMP") {
-			t.Errorf("в пояснении нет причины — фильтрации ICMP: %q", r.Note)
+		if r.NoteID != "map.note.opaque" {
+			t.Errorf("непрослеживаемый маршрут описан кодом %q, хотели map.note.opaque", r.NoteID)
 		}
 	})
 
@@ -237,8 +261,38 @@ func TestBuildRoute(t *testing.T) {
 		if r.Break != nil {
 			t.Errorf("на пустом маршруте нашлась точка обрыва: %+v", r.Break)
 		}
-		if r.Note == "" {
-			t.Error("пустой маршрут остался без объяснения")
+		if r.NoteID != "map.note.no_reply" {
+			t.Errorf("пустой маршрут остался без объяснения: %q", r.NoteID)
+		}
+	})
+
+	// Через VPN-туннель первые же 60 мс — цена самого туннеля, а не
+	// расстояние до цели. Порог «рядом» сравнивается со временем сверх
+	// первого публичного шага, иначе всё, что видно через туннель,
+	// казалось бы далёким и точка присутствия под боком не распознавалась.
+	t.Run("базовое время туннеля вычитается из порога точки присутствия", func(t *testing.T) {
+		r := BuildRoute("chatgpt.com", "104.18.32.47", []probe.Hop{
+			hop(1, "192.168.1.1", 1, probe.HopOK),
+			hop(2, "198.51.100.1", 60, probe.HopOK), // выход VPN: 60 мс — туннель
+			hop(3, "104.18.32.47", 85, probe.HopFinal),
+		}, db, true, nil)
+
+		if !r.FarCountry {
+			t.Errorf("85 мс при базе 60 мс — это 25 мс до цели, точка присутствия не распознана: %+v", r)
+		}
+	})
+
+	// Когда, кроме самой цели, не ответил никто, вычитать нечего: база из
+	// самой цели давала бы ноль и любую цель объявляла бы соседней.
+	t.Run("цель не годится в базу для собственного порога", func(t *testing.T) {
+		r := BuildRoute("example.com", "104.18.32.47", []probe.Hop{
+			hop(1, "192.168.1.1", 1, probe.HopOK),
+			hop(2, "", 0, probe.HopSilent),
+			hop(3, "104.18.32.47", 120, probe.HopFinal),
+		}, db, true, nil)
+
+		if r.FarCountry {
+			t.Error("120 мс до США без единого промежуточного замера сочтены «рядом»")
 		}
 	})
 }

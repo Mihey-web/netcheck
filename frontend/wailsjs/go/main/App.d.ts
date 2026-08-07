@@ -7,6 +7,8 @@ import {runner} from '../models';
 
 export function ApplyWindowScale():Promise<void>;
 
+export function CancelCheck():Promise<void>;
+
 export function Catalog():Promise<Array<catalog.Item>>;
 
 export function ClearHistory():Promise<void>;

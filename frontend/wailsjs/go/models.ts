@@ -284,7 +284,9 @@ export namespace geo {
 	    host?: string;
 	    city?: string;
 	    at?: LatLon;
+	    guessed?: boolean;
 	    implausible?: boolean;
+	    ambiguous?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Node(source);
@@ -303,7 +305,9 @@ export namespace geo {
 	        this.host = source["host"];
 	        this.city = source["city"];
 	        this.at = this.convertValues(source["at"], LatLon);
+	        this.guessed = source["guessed"];
 	        this.implausible = source["implausible"];
+	        this.ambiguous = source["ambiguous"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -335,6 +339,8 @@ export namespace geo {
 	    serviceOK: boolean;
 	    opaque: boolean;
 	    note?: string;
+	    noteId?: string;
+	    noteArgs?: string[];
 	    anchor?: LatLon;
 	
 	    static createFrom(source: any = {}) {
@@ -353,6 +359,8 @@ export namespace geo {
 	        this.serviceOK = source["serviceOK"];
 	        this.opaque = source["opaque"];
 	        this.note = source["note"];
+	        this.noteId = source["noteId"];
+	        this.noteArgs = source["noteArgs"];
 	        this.anchor = this.convertValues(source["anchor"], LatLon);
 	    }
 	
@@ -455,6 +463,7 @@ export namespace probe {
 	    server?: string;
 	    cfMitigated?: string;
 	    body?: string;
+	    challenge?: boolean;
 	    sni?: string;
 	    cert?: CertInfo;
 	
@@ -477,6 +486,7 @@ export namespace probe {
 	        this.server = source["server"];
 	        this.cfMitigated = source["cfMitigated"];
 	        this.body = source["body"];
+	        this.challenge = source["challenge"];
 	        this.sni = source["sni"];
 	        this.cert = this.convertValues(source["cert"], CertInfo);
 	    }
@@ -514,10 +524,12 @@ export namespace runner {
 	    services: verdict.ServiceVerdict[];
 	    verdict: verdict.Verdict;
 	    aborted?: boolean;
+	    canceled?: boolean;
 	    captive?: string;
 	    routes?: geo.Route[];
 	    geoDirect?: geo.Info;
 	    geoProxy?: geo.Info;
+	    geoDataDate?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Report(source);
@@ -533,10 +545,12 @@ export namespace runner {
 	        this.services = this.convertValues(source["services"], verdict.ServiceVerdict);
 	        this.verdict = this.convertValues(source["verdict"], verdict.Verdict);
 	        this.aborted = source["aborted"];
+	        this.canceled = source["canceled"];
 	        this.captive = source["captive"];
 	        this.routes = this.convertValues(source["routes"], geo.Route);
 	        this.geoDirect = this.convertValues(source["geoDirect"], geo.Info);
 	        this.geoProxy = this.convertValues(source["geoProxy"], geo.Info);
+	        this.geoDataDate = source["geoDataDate"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -581,6 +595,7 @@ export namespace verdict {
 	    directOk: boolean;
 	    proxyOk: boolean;
 	    proxyTried?: boolean;
+	    challenged?: boolean;
 	    cause: string;
 	
 	    static createFrom(source: any = {}) {
@@ -593,6 +608,7 @@ export namespace verdict {
 	        this.directOk = source["directOk"];
 	        this.proxyOk = source["proxyOk"];
 	        this.proxyTried = source["proxyTried"];
+	        this.challenged = source["challenged"];
 	        this.cause = source["cause"];
 	    }
 	}

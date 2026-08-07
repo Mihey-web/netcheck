@@ -130,7 +130,8 @@ func writeRecords(records []Record) error {
 	}
 
 	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, []byte(sb.String()), 0o644); err != nil {
+	// 0600: история прогонов — данные пользователя, другим учёткам она ни к чему.
+	if err := os.WriteFile(tmp, []byte(sb.String()), 0o600); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, p); err != nil {
@@ -257,11 +258,7 @@ func Summarize(r runner.Report, l i18n.Lang) Entry {
 		summary = r.Verdict.Lines[0]
 	}
 	if len(broken) > 0 {
-		label := "не открываются"
-		if l == i18n.EN {
-			label = "down"
-		}
-		tail := label + ": " + strings.Join(broken, ", ")
+		tail := i18n.T(l, "hist.broken") + ": " + strings.Join(broken, ", ")
 		if summary == "" {
 			summary = tail
 		} else {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -23,47 +24,104 @@ type App struct {
 	// перезагрузкой страницы, а два прогона разом смешали бы события
 	// в одной таблице и потеряли бы одну из двух записей истории.
 	busy atomic.Bool
+	// cancelRun — отмена текущего прогона. Под мьютексом: ставится из
+	// RunCheck, дёргается из CancelCheck — это разные вызовы биндингов.
+	cancelMu  sync.Mutex
+	cancelRun context.CancelFunc
+	// cfgMu сериализует read-modify-write конфига: SetTab и SetServices из
+	// параллельных вызовов биндингов иначе затирали бы правки друг друга.
+	cfgMu sync.Mutex
+	// emit — отправка события фронту. Поле, а не прямой вызов, чтобы тесты
+	// могли перехватывать события без Wails-рантайма.
+	emit func(name string, data ...interface{})
 }
 
 func NewApp() *App { return &App{} }
 
 func (a *App) startup(ctx context.Context) { a.ctx = ctx }
 
-// RunCheck — полный прогон. Прогресс по слоям уходит событием "progress".
+// event шлёт событие фронту; без Wails-контекста молчит.
+func (a *App) event(name string, data ...interface{}) {
+	if a.emit != nil {
+		a.emit(name, data...)
+		return
+	}
+	if a.ctx != nil {
+		wr.EventsEmit(a.ctx, name, data...)
+	}
+}
+
+// RunCheck — полный прогон. Прогресс по слоям уходит событием "progress",
+// итог — событием "done": перезагруженная посреди прогона страница теряет
+// промис RunCheck навсегда, и без события она не дожила бы до отчёта.
 func (a *App) RunCheck() runner.Report {
 	if !a.busy.CompareAndSwap(false, true) {
-		return runner.Report{} // прогон уже идёт
+		// Прогон уже идёт. Молчаливый пустой Report выглядел во фронте как
+		// «проверка мгновенно закончилась ничем» — теперь об этом сказано.
+		a.event("run-busy")
+		return runner.Report{}
 	}
 	defer a.busy.Store(false)
 
-	cfg, _ := config.Load() // при ошибке чтения получаем дефолт
+	cfg, err := config.Load()
+	if err != nil {
+		// Битый конфиг молча подменялся дефолтом; пользователь должен знать,
+		// что прогон идёт не с его настройками.
+		a.event("config-error", err.Error())
+	}
 	lang := i18n.Resolve(cfg.Lang)
 
 	ctx := a.ctx
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	runCtx, cancel := context.WithCancel(ctx)
+	a.cancelMu.Lock()
+	a.cancelRun = cancel
+	a.cancelMu.Unlock()
+	defer func() {
+		a.cancelMu.Lock()
+		a.cancelRun = nil
+		a.cancelMu.Unlock()
+		cancel()
+	}()
 
-	snap := env.Detect(ctx, cfg.ProxyPorts)
-	if a.ctx != nil {
-		wr.EventsEmit(a.ctx, "env", snap)
-	}
+	snap := env.Detect(runCtx, cfg.ProxyPorts)
+	a.event("env", snap)
 
-	rep := runner.Run(ctx, cfg, lang, runner.Live{}, snap, func(p runner.Progress) {
-		if a.ctx != nil {
-			wr.EventsEmit(a.ctx, "progress", p)
-		}
+	rep := runner.Run(runCtx, cfg, lang, runner.Live{}, snap, func(p runner.Progress) {
+		a.event("progress", p)
 	})
 
-	// Не сохранилось — надо сказать. Молча потерянный прогон после
-	// перезапуска выглядит как «результат исчез сам».
-	if err := history.Append(
-		history.Record{Entry: history.Summarize(rep, lang), Report: &rep},
-		cfg.HistoryKeep,
-	); err != nil && a.ctx != nil {
-		wr.EventsEmit(a.ctx, "hist-error", err.Error())
+	// Отменённый прогон в историю не пишем: его замеры — таймауты умершего
+	// контекста, и запись «Интернета нет» рядом с честными была бы враньём.
+	if shouldRecord(runCtx, rep) {
+		// Не сохранилось — надо сказать. Молча потерянный прогон после
+		// перезапуска выглядит как «результат исчез сам».
+		if err := history.Append(
+			history.Record{Entry: history.Summarize(rep, lang), Report: &rep},
+			cfg.HistoryKeep,
+		); err != nil {
+			a.event("hist-error", err.Error())
+		}
 	}
+	a.event("done", rep)
 	return rep
+}
+
+// shouldRecord — писать ли прогон в историю: отменённый не пишем.
+func shouldRecord(ctx context.Context, rep runner.Report) bool {
+	return !rep.Canceled && ctx.Err() == nil
+}
+
+// CancelCheck прерывает текущий прогон; без прогона ничего не делает.
+// Итог всё равно придёт событием "done" — уже с пометкой Canceled.
+func (a *App) CancelCheck() {
+	a.cancelMu.Lock()
+	if a.cancelRun != nil {
+		a.cancelRun()
+	}
+	a.cancelMu.Unlock()
 }
 
 func (a *App) GetHistory() []history.Entry {
@@ -109,11 +167,17 @@ func (a *App) GetConfig() config.Config {
 	return cfg
 }
 
-func (a *App) SaveConfig(c config.Config) error { return c.Save() }
+func (a *App) SaveConfig(c config.Config) error {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	return c.Save()
+}
 
 // SetTab запоминает открытую вкладку, чтобы программа поднималась там же,
 // где её закрыли.
 func (a *App) SetTab(tab string) error {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -135,6 +199,8 @@ func (a *App) Presets() map[string][]string { return catalog.Presets }
 // «Сервисы» правит только выбор и не должна тащить с собой весь конфиг,
 // который мог измениться в другом месте.
 func (a *App) SetServices(enabled []string, custom []catalog.Custom) error {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
 	// Конфиг не прочитался — не сохраняем поверх него дефолты: так первое же
 	// изменение галочки стирало выбор целей, который ещё можно было починить
 	// руками. Load уже отложил битый файл в сторону, и следующая попытка
@@ -192,6 +258,8 @@ func (a *App) CurrentLang() string {
 }
 
 func (a *App) SetLang(l string) error {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
 	cfg, err := config.Load()
 	if err != nil {
 		return err

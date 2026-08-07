@@ -1,7 +1,10 @@
 package fonts
 
 import (
+	"encoding/base64"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -36,17 +39,19 @@ func TestBuildCSSInstalledFamilies(t *testing.T) {
 }
 
 func TestBuildCSSCustomFile(t *testing.T) {
+	// валидная TrueType-сигнатура + произвольный хвост
+	payload := []byte{0x00, 0x01, 0x00, 0x00, 0xde, 0xad, 0xbe, 0xef}
 	read := func(path string) ([]byte, error) {
 		if path != "C:\\fonts\\se.ttf" {
 			return nil, errors.New("unexpected path " + path)
 		}
-		return []byte{0xde, 0xad, 0xbe, 0xef}, nil
+		return payload, nil
 	}
 	css := BuildCSS(config.UI{FontFile: "C:\\fonts\\se.ttf"}, read)
 	if !strings.Contains(css, "@font-face") {
 		t.Fatalf("custom file must produce @font-face:\n%s", css)
 	}
-	if !strings.Contains(css, "base64,3q2+7w==") {
+	if !strings.Contains(css, "base64,"+base64.StdEncoding.EncodeToString(payload)) {
 		t.Errorf("font must be inlined as base64 data URL:\n%s", css)
 	}
 	if !strings.Contains(css, customFamily) {
@@ -62,6 +67,58 @@ func TestBuildCSSUnreadableFileFallsBack(t *testing.T) {
 	}
 	if !strings.Contains(css, "Bahnschrift") {
 		t.Fatal("must fall back to the default font")
+	}
+}
+
+func TestBuildCSSRejectsNonFontContent(t *testing.T) {
+	// расширение шрифтовое, но внутри не шрифт (например, exe или конфиг)
+	read := func(string) ([]byte, error) { return []byte("MZ\x90\x00 definitely not a font"), nil }
+	css := BuildCSS(config.UI{FontFile: "C:\\fonts\\fake.ttf"}, read)
+	if strings.Contains(css, "@font-face") {
+		t.Fatalf("file without a font signature must be rejected:\n%s", css)
+	}
+	if !strings.Contains(css, "Bahnschrift") {
+		t.Fatal("must fall back to the default font")
+	}
+}
+
+func TestBuildCSSRejectsNonFontExtension(t *testing.T) {
+	// сигнатура подходящая, но расширение чужое: путь в конфиге не должен
+	// позволять утащить в страницу произвольный файл
+	read := func(string) ([]byte, error) { return []byte("wOF2 + payload"), nil }
+	css := BuildCSS(config.UI{FontFile: "C:\\secrets\\config.yaml"}, read)
+	if strings.Contains(css, "@font-face") {
+		t.Fatalf("non-font extension must be rejected:\n%s", css)
+	}
+}
+
+func TestBuildCSSAcceptsRealWOFF2(t *testing.T) {
+	// настоящий файл на диске (t.TempDir) и настоящий os.ReadFile (read=nil)
+	p := filepath.Join(t.TempDir(), "font.woff2")
+	payload := append([]byte("wOF2"), 0x00, 0x01, 0x02, 0x03)
+	if err := os.WriteFile(p, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	css := BuildCSS(config.UI{FontFile: p}, nil)
+	if !strings.Contains(css, "@font-face") {
+		t.Fatalf("real woff2 file must produce @font-face:\n%s", css)
+	}
+	if !strings.Contains(css, "font/woff2") {
+		t.Errorf("MIME must match woff2:\n%s", css)
+	}
+}
+
+func TestBuildCSSEscapesFamilyName(t *testing.T) {
+	css := BuildCSS(config.UI{FontHUD: `Evil'},body{background:url('x`}, nil)
+	if strings.Contains(css, "'Evil'}") {
+		t.Fatalf("quote in family name must be escaped:\n%s", css)
+	}
+	if !strings.Contains(css, `Evil\'`) {
+		t.Errorf("escaped quote expected in output:\n%s", css)
+	}
+	css = BuildCSS(config.UI{FontMono: `Back\slash`}, nil)
+	if !strings.Contains(css, `Back\\slash`) {
+		t.Errorf("backslash in family name must be escaped:\n%s", css)
 	}
 }
 

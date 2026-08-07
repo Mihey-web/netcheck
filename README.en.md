@@ -90,9 +90,17 @@ system proxy is off, so your browser is going around it.*
 
 ## Install
 
-Download `netcheck.exe` from [Releases](../../-/releases) and run it. That's it —
+Download the exe for your architecture (x64 or ARM64) and run it. That's it —
 no installer, no dependencies, no admin rights. It's a single ~11 MB binary using the
 WebView2 runtime that ships with Windows 10/11.
+
+- **GitHub**: [github.com/Mihey-web/netcheck/releases](https://github.com/Mihey-web/netcheck/releases)
+
+On first run Windows will show a SmartScreen warning — the binary is not signed with a
+paid certificate, so to Windows it's simply an "unknown file". Click
+"More info" → "Run anyway". To verify the file is the one built from these sources,
+check it against `SHA256SUMS.txt` from the release — compare with the output of
+`Get-FileHash netcheck-windows-x64.exe` in PowerShell.
 
 netcheck does not install a service, does not start with Windows, and does not run in
 the background. You open it, press the button, read the verdict, close it.
@@ -155,7 +163,8 @@ sends no telemetry, opens no listening port, and stores nothing outside
 
 ## Build from source
 
-Requires [Go](https://go.dev/dl/) 1.25+ and the [Wails](https://wails.io) CLI:
+Requires [Go](https://go.dev/dl/) 1.25+, [Node.js](https://nodejs.org/) 20.19+ (builds
+the frontend) and the [Wails](https://wails.io) CLI:
 
 ```bash
 go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0

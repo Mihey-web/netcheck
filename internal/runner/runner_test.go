@@ -12,6 +12,7 @@ import (
 	"github.com/mihey/netcheck/internal/env"
 	"github.com/mihey/netcheck/internal/i18n"
 	"github.com/mihey/netcheck/internal/probe"
+	"github.com/mihey/netcheck/internal/verdict"
 )
 
 // fakeProber воспроизводит сценарий мокапа: рунет и заграница живы,
@@ -197,5 +198,179 @@ func TestRunLayersAndProgress(t *testing.T) {
 	}
 	if len(rep.Verdict.Lines) == 0 {
 		t.Error("verdict lines must not be empty")
+	}
+}
+
+// cancelingProber жмёт «Отменить» посреди слоя DNS: ровно так выглядят
+// кнопка отмены и закрытие окна во время прогона.
+type cancelingProber struct {
+	fakeProber
+	cancel context.CancelFunc
+}
+
+func (p cancelingProber) ResolveSystem(ctx context.Context, host string) probe.Result {
+	p.cancel()
+	return p.fakeProber.ResolveSystem(ctx, host)
+}
+
+func TestRunCanceledMidRun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rep := Run(ctx, testConfig(), i18n.RU, cancelingProber{cancel: cancel},
+		env.Snapshot{Gateway: "192.168.0.1"}, nil)
+
+	if !rep.Canceled {
+		t.Fatal("отменённый прогон обязан быть помечен Canceled")
+	}
+	// слои после отмены — непроверенные, а не выдуманно-мёртвые
+	for _, l := range rep.Layers {
+		if l.Layer == "runet" || l.Layer == "global" || l.Layer == "blocked" {
+			if l.Status != probe.StatusSkip {
+				t.Errorf("слой %s: got %s, want skip", l.Layer, l.Status)
+			}
+		}
+	}
+	if len(rep.Services) != 0 {
+		t.Errorf("после отмены сервисы не проверяются, got %d", len(rep.Services))
+	}
+	all := strings.Join(rep.Verdict.Lines, " ")
+	if !strings.Contains(all, "прервана") {
+		t.Errorf("вердикт обязан сказать, что прогон прерван: %q", all)
+	}
+	// главное: отмена не должна превращаться в диагноз о сети
+	for _, lie := range []string{"Интернета нет", "недоступ", "заблокирован"} {
+		if strings.Contains(all, lie) {
+			t.Errorf("отмена выдана за диагноз (%q): %s", lie, all)
+		}
+	}
+}
+
+// captiveKind разбирает ответ контрольного HTTP-запроса; здесь — границы:
+// каждая ошибка в них превращается в совет «авторизуйтесь в Wi-Fi» там,
+// где авторизовываться негде.
+func TestCaptiveKind(t *testing.T) {
+	cases := []struct {
+		name string
+		r    probe.Result
+		want string
+	}{
+		{"никто не ответил", probe.Result{Code: 0}, ""},
+		{"настоящий ответ адресата", probe.Result{Code: 200, Body: captiveBody}, captiveOpen},
+		{"200 с чужим телом — подмена", probe.Result{Code: 200, Body: "<html>login</html>"}, captivePortal},
+		{"ошибка адресата — не портал", probe.Result{Code: 404}, ""},
+		{"штатный редирект внутри сайта", probe.Result{Code: 302, Location: "www.msftconnecttest.com"}, captiveOpen},
+		{"редирект на чужой хост — портал", probe.Result{Code: 302, Location: "portal.example.com"}, captivePortal},
+	}
+	for _, tc := range cases {
+		if got := captiveKind(tc.r); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// redirectProber — сервис отвечает штатным редиректом на другой домен,
+// как claude.ai отвечает 302 на www.anthropic.com.
+type redirectProber struct{ fakeProber }
+
+func (redirectProber) HTTPGet(ctx context.Context, rawURL string, proxy *url.URL, pinIP string) probe.Result {
+	r := probe.Result{Target: rawURL, Method: "HTTPS", Status: probe.StatusOK,
+		Outcome: probe.OutOK, Code: 302, Location: "www.anthropic.com", Path: probe.PathDirect}
+	if proxy != nil {
+		// Через VPN тот же сервис отдаёт 403: выходной адрес в чёрном списке.
+		// Это про VPN, а не про сервис, и вердикт не должен их путать.
+		r = probe.Result{Target: rawURL, Method: "HTTPS", Status: probe.StatusFail,
+			Outcome: probe.OutOK, Code: 403, Path: probe.PathProxy}
+	}
+	return r
+}
+
+// Редирект на чужой домен с проверенного сертификата — ответ настоящего
+// сервера, а не заглушка провайдера: заглушке для этого нужен доверенный
+// сертификат на чужое имя. Прежнее правило объявляло claude.ai сломанным,
+// и пользователь читал «claude.ai не работает», разговаривая через него же.
+func TestCrossDomainRedirectIsNotABlock(t *testing.T) {
+	cfg := testConfig()
+	cfg.Targets.Blocked = []string{"claude.ai"}
+	cfg.Map.Enabled = false
+
+	snap := env.Snapshot{Gateway: "192.168.0.1"}
+	rep := Run(context.Background(), cfg, i18n.RU, redirectProber{}, snap, nil)
+
+	var got *verdictService
+	for i := range rep.Services {
+		if rep.Services[i].Host == "claude.ai" {
+			got = &verdictService{rep.Services[i].DirectOK, rep.Services[i].Cause}
+		}
+	}
+	if got == nil {
+		t.Fatal("claude.ai пропал из отчёта")
+	}
+	if !got.directOK {
+		t.Errorf("штатный редирект на чужой домен принят за блокировку, cause=%q", got.cause)
+	}
+	if got.cause != "" {
+		t.Errorf("работающему сервису приписана причина блокировки: %q", got.cause)
+	}
+	for _, line := range rep.Verdict.Lines {
+		if strings.Contains(line, "claude.ai") {
+			t.Errorf("работающий сервис попал в вердикт: %q", line)
+		}
+	}
+}
+
+type verdictService struct {
+	directOK bool
+	cause    analyze.Cause
+}
+
+// challengeProber — сервис отдаёт капчу Cloudflare, как claude.ai через VPN:
+// 403 с заголовком Cf-Mitigated: challenge и страницей «Just a moment...».
+type challengeProber struct{ fakeProber }
+
+func (challengeProber) HTTPGet(ctx context.Context, rawURL string, proxy *url.URL, pinIP string) probe.Result {
+	r := probe.Result{Target: rawURL, Method: "HTTPS", Status: probe.StatusWarn,
+		Outcome: probe.OutOK, Code: 403, CFMitigated: "challenge",
+		Body: "<title>Just a moment...</title>", Challenge: true, Path: probe.PathDirect}
+	if proxy != nil {
+		r.Path = probe.PathProxy
+	}
+	return r
+}
+
+// Капча — не блокировка: сервер ответил, путь до него чист, в браузере сайт
+// откроется. Записывать его в недоступные значило объявлять сломанным сервис,
+// через который пользователь в эту минуту работает.
+func TestChallengeIsNotABlock(t *testing.T) {
+	cfg := testConfig()
+	cfg.Targets.Blocked = []string{"claude.ai"}
+	cfg.Map.Enabled = false
+
+	rep := Run(context.Background(), cfg, i18n.RU, challengeProber{},
+		env.Snapshot{Gateway: "192.168.0.1"}, nil)
+
+	var sv *verdict.ServiceVerdict
+	for i := range rep.Services {
+		if rep.Services[i].Host == "claude.ai" {
+			sv = &rep.Services[i]
+		}
+	}
+	if sv == nil {
+		t.Fatal("claude.ai пропал из отчёта")
+	}
+	if !sv.Challenged {
+		t.Error("капча не распознана")
+	}
+	if !sv.DirectOK {
+		t.Errorf("сервис с капчей записан в недоступные, cause=%q", sv.Cause)
+	}
+	all := strings.Join(rep.Verdict.Lines, "\n")
+	if !strings.Contains(all, "я не робот") {
+		t.Errorf("про капчу не сказано ни слова:\n%s", all)
+	}
+	for _, bad := range []string{"блокирует", "режет", "не пускает", "даже через VPN"} {
+		if strings.Contains(all, bad) {
+			t.Errorf("капча подана как блокировка (%q):\n%s", bad, all)
+		}
 	}
 }

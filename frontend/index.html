@@ -35,6 +35,9 @@
             <small id="btn-sub">—</small>
         </button>
 
+        <!-- конфиг не прочитался: ненавязчивая строка, а не модалка -->
+        <div id="cfg-err" class="cfg-err hidden"></div>
+
         <section class="pan">
             <h3><span data-i18n="panel.env">Окружение</span><span class="hx">ENV</span></h3>
             <div class="bd" id="env-body"></div>
@@ -97,16 +100,17 @@
         </div>
         <div class="svc-groups" id="svc-groups"></div>
         <div class="svc-foot">
-            <input id="svc-host" type="text" spellcheck="false"
-                   data-i18n-ph="svc.custom_ph" placeholder="свой хост, например example.com"/>
+            <input id="svc-host" type="text" spellcheck="false" data-i18n-ph="svc.custom_ph"/>
             <select id="svc-group">
-                <option value="runet" data-i18n="grp.runet">Рунет</option>
+                <option value="runet" data-i18n="grp.runet"></option>
                 <option value="global" data-i18n="grp.global">Заграница</option>
                 <option value="blocked" selected data-i18n="grp.blocked">Блокируемые</option>
                 <option value="geo" data-i18n="grp.geo">Геоблок</option>
             </select>
             <button class="sbtn" id="svc-add" data-i18n="svc.add">Добавить</button>
         </div>
+        <!-- ошибка валидации своего адреса; текст проставляет main.js -->
+        <p class="svc-err hidden" id="svc-err"></p>
         <p class="svc-note" data-i18n="svc.note"></p>
     </section>
 </main>
@@ -114,7 +118,9 @@
 <!-- ═══ вкладка «Карта» ═══ -->
 <main id="view-map" class="mapview hidden">
     <section class="pan mappan">
-        <h3><span data-i18n="map.title">Карта досягаемости</span><span class="hx">MAP</span></h3>
+        <!-- подписи с data-i18n заполняет applyLang — дублировать текст здесь
+     значит разойтись со словарём -->
+        <h3><span data-i18n="map.title"></span><span class="hx">MAP</span></h3>
         <div class="map-bar">
             <div class="map-sum" id="map-sum"></div>
         </div>
@@ -145,7 +151,7 @@
                 <span class="li"><i class="ldot ok"></i><span data-i18n="map.legend.ok">маршрут дошёл до цели</span></span>
                 <span class="li"><i class="lpop"></i><span data-i18n="map.legend.warn">ответила ближайшая точка присутствия CDN</span></span>
                 <span class="li"><i class="lx"></i><span data-i18n="map.legend.fail">путь оборвался здесь</span></span>
-                <span class="li"><i class="lpin you"></i><span data-i18n="map.legend.you">ты здесь</span></span>
+                <span class="li"><i class="lpin you"></i><span data-i18n="map.legend.you">вы здесь</span></span>
                 <span class="li"><i class="lpin vpn"></i><span data-i18n="map.legend.vpn">выход VPN</span></span>
             </div>
             <p class="map-note" data-i18n="map.note.cdn"></p>

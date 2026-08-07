@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/mihey/netcheck/internal/geo/ipdb"
 	"github.com/oschwald/maxminddb-golang/v2"
@@ -42,7 +43,7 @@ func main() {
 		log.Fatal("нужны обе исходные базы")
 	}
 
-	countries, err := readCountries(*countryPath)
+	countries, released, err := readCountries(*countryPath)
 	if err != nil {
 		log.Fatalf("страны: %v", err)
 	}
@@ -51,9 +52,10 @@ func main() {
 		log.Fatalf("автономные системы: %v", err)
 	}
 
-	log.Printf("страны: %d диапазонов, AS: %d диапазонов", len(countries), len(asns))
+	log.Printf("страны: %d диапазонов, AS: %d диапазонов, выпуск %s",
+		len(countries), len(asns), released.Format("2006-01-02"))
 
-	if err := write(*out, countries, asns); err != nil {
+	if err := write(*out, countries, asns, released); err != nil {
 		log.Fatalf("запись: %v", err)
 	}
 
@@ -84,12 +86,18 @@ func v4span(p netip.Prefix) (span, bool) {
 	return span{start, start + size}, true
 }
 
-func readCountries(path string) ([]ipdb.Country, error) {
+// readCountries читает диапазоны стран и заодно дату сборки исходной базы:
+// она пишется в заголовок NCGEO1, чтобы устаревшие данные было видно.
+func readCountries(path string) ([]ipdb.Country, time.Time, error) {
 	db, err := maxminddb.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	defer db.Close()
+
+	// Дата — из метаданных самой базы, а не из времени запуска генератора:
+	// пересборка старого mmdb не делает данные свежее.
+	released := time.Unix(int64(db.Metadata.BuildEpoch), 0).UTC()
 
 	var out []ipdb.Country
 	for res := range db.Networks() {
@@ -99,7 +107,7 @@ func readCountries(path string) ([]ipdb.Country, error) {
 			} `maxminddb:"country"`
 		}
 		if err := res.Decode(&rec); err != nil {
-			return nil, err
+			return nil, time.Time{}, err
 		}
 		code := rec.Country.ISOCode
 		if len(code) != 2 {
@@ -118,7 +126,7 @@ func readCountries(path string) ([]ipdb.Country, error) {
 		out = append(out, ipdb.Country{Start: s.start, End: s.end, Code: code})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Start < out[j].Start })
-	return out, nil
+	return out, released, nil
 }
 
 func readASNs(path string) ([]ipdb.ASN, error) {
@@ -154,7 +162,7 @@ func readASNs(path string) ([]ipdb.ASN, error) {
 	return out, nil
 }
 
-func write(path string, cs []ipdb.Country, as []ipdb.ASN) error {
+func write(path string, cs []ipdb.Country, as []ipdb.ASN, released time.Time) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -168,7 +176,7 @@ func write(path string, cs []ipdb.Country, as []ipdb.ASN) error {
 	if err != nil {
 		return err
 	}
-	if err := ipdb.Build(gz, cs, as); err != nil {
+	if err := ipdb.BuildReleased(gz, cs, as, released); err != nil {
 		return fmt.Errorf("сборка: %w", err)
 	}
 	if err := gz.Close(); err != nil {

@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -8,10 +9,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -118,10 +122,40 @@ func TestSameSite(t *testing.T) {
 		{"youtube.com", "block.isp.ru", false},       // заглушка провайдера
 		{"discord.com", "discord.gg", false},         // другой домен
 		{"ya.ru", "", true},                          // относительный Location
+		// Суффиксы из двух меток: «две последние метки» считали
+		// block.isp.co.uk тем же сайтом, что и site.co.uk.
+		{"site.co.uk", "block.isp.co.uk", false},
+		{"www.site.co.uk", "site.co.uk", true},
+		{"site.com.tr", "block.isp.com.tr", false},
 	}
 	for _, c := range cases {
 		if got := sameSite(c.req, c.loc); got != c.want {
 			t.Errorf("sameSite(%q,%q) = %v, want %v", c.req, c.loc, got, c.want)
+		}
+	}
+}
+
+// Границы эвристики «я не робот»: Cf-Mitigated говорит о challenge только
+// значением "challenge" ("block" — это блок), а голое слово «captcha»
+// в тексте страницы ловило и формы обратной связи.
+func TestIsChallenge(t *testing.T) {
+	cases := []struct {
+		name string
+		r    Result
+		want bool
+	}{
+		{"cloudflare challenge на 503", Result{Code: 503, CFMitigated: "challenge"}, true},
+		{"cf-mitigated: block — это блок, а не challenge", Result{Code: 403, CFMitigated: "block"}, false},
+		{"страница just a moment на 503", Result{Code: 503, Body: "<title>Just a moment...</title>"}, true},
+		{"страница challenges.cloudflare.com", Result{Code: 403, Body: "src=\"https://challenges.cloudflare.com/x.js\""}, true},
+		{"datadome captcha-delivery", Result{Code: 403, Body: "src=\"https://ct.captcha-delivery.com/c.js\""}, true},
+		{"голое слово captcha — не challenge", Result{Code: 403, Body: "contact us if the captcha bothered you"}, false},
+		{"код 200 — не challenge, что бы ни было в теле", Result{Code: 200, Body: "just a moment"}, false},
+		{"обычный 403 без подписей", Result{Code: 403, Body: "Forbidden"}, false},
+	}
+	for _, c := range cases {
+		if got := IsChallenge(c.r); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
 	}
 }
@@ -167,5 +201,130 @@ func TestHTTPGetOKAndRedirect(t *testing.T) {
 	}
 	if res.Location != "block.example.isp" {
 		t.Errorf("location = %q, want host of redirect target", res.Location)
+	}
+}
+
+// Обрыв тела RST'ом — почерк частичной фильтрации: заголовки пропустили,
+// содержимое срезали. Такой ответ обязан давать предупреждение «тело
+// оборвано», а не сходить за «сайт жив»: раньше ошибка чтения тела
+// молча выбрасывалась.
+func TestHTTPGetBodyCutByRST(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("httptest-сервер обязан уметь Hijack")
+			return
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		// Заголовки обещают длинное тело, отдаём только начало…
+		io.WriteString(conn, "HTTP/1.1 200 OK\r\n"+
+			"Content-Type: text/html\r\n"+
+			"Content-Length: 65536\r\n\r\n"+
+			strings.Repeat("x", 512))
+		// …даём клиенту прочитать заголовки и рвём сокет сбросом:
+		// SetLinger(0) превращает Close в RST вместо честного FIN.
+		time.Sleep(100 * time.Millisecond)
+		if tc, ok := conn.(*net.TCPConn); ok {
+			tc.SetLinger(0)
+		}
+		conn.Close()
+	}))
+	defer srv.Close()
+
+	res := HTTPGet(context.Background(), srv.URL, nil, "")
+	if res.Status != StatusWarn {
+		t.Fatalf("оборванное тело должно давать warn, got %s (%s)", res.Status, res.Detail)
+	}
+	if !strings.Contains(res.Detail, "тело оборвано") {
+		t.Errorf("detail = %q, ждали упоминание обрыва тела", res.Detail)
+	}
+	if res.Outcome == OutOK || res.Outcome == "" {
+		t.Errorf("outcome = %q — обрыв тела сошёл за успех", res.Outcome)
+	}
+}
+
+// fakeConnectProxy — локальный HTTP-прокси: на CONNECT отвечает статусом
+// status; при echo=true дальше возвращает клиенту всё, что тот прислал.
+func fakeConnectProxy(t *testing.T, status string, echo bool) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				req, err := http.ReadRequest(br)
+				if err != nil || req.Method != http.MethodConnect {
+					return
+				}
+				io.WriteString(c, "HTTP/1.1 "+status+"\r\n\r\n")
+				if echo {
+					// эхо через br: часть данных клиента могла уже
+					// осесть в буфере чтения
+					io.Copy(c, br)
+				}
+			}(conn)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// Ответ 200 на CONNECT — туннель установлен: соединение живо и данные
+// ходят в обе стороны.
+func TestDialViaProxyHTTPConnectOK(t *testing.T) {
+	addr := fakeConnectProxy(t, "200 Connection established", true)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	u, err := url.Parse("http://" + addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := DialViaProxy(ctx, u, "target.test:443")
+	if err != nil {
+		t.Fatalf("CONNECT 200 должен давать живое соединение: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("данные через туннель не вернулись: %v", err)
+	}
+	if string(buf) != "ping" {
+		t.Errorf("эхо = %q, want %q", buf, "ping")
+	}
+}
+
+// Отказ прокси на CONNECT — ошибка с внятным упоминанием прокси: именно
+// по этому тексту человек отличает «VPN-клиент не смог» от «сайт лежит».
+func TestDialViaProxyHTTPConnectRefused(t *testing.T) {
+	addr := fakeConnectProxy(t, "502 Bad Gateway", false)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	u, err := url.Parse("http://" + addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := DialViaProxy(ctx, u, "target.test:443")
+	if err == nil {
+		conn.Close()
+		t.Fatal("502 от прокси должен быть ошибкой, а не соединением")
+	}
+	if !strings.Contains(err.Error(), "proxy CONNECT") {
+		t.Errorf("ошибка %q не упоминает proxy CONNECT", err)
 	}
 }

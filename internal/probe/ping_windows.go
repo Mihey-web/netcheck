@@ -51,7 +51,7 @@ func Ping(ctx context.Context, ip string) Result {
 		if left := time.Until(dl).Milliseconds(); left > 0 {
 			timeoutMs = uint32(left)
 		} else {
-			r.Status, r.Detail = StatusFail, "context deadline exceeded"
+			r.Status, r.Detail, r.Outcome = StatusFail, "context deadline exceeded", OutTimeout
 			return r
 		}
 	}
@@ -68,7 +68,7 @@ func Ping(ctx context.Context, ip string) Result {
 	buf := make([]byte, int(replySize)+len(payload)+8)
 
 	start := time.Now()
-	ret, _, _ := procIcmpSendEcho.Call(
+	ret, _, callErr := procIcmpSendEcho.Call(
 		handle,
 		uintptr(addr),
 		uintptr(unsafe.Pointer(&payload[0])),
@@ -80,16 +80,49 @@ func Ping(ctx context.Context, ip string) Result {
 	)
 	r.Latency = time.Since(start)
 	if ret == 0 {
-		r.Status, r.Detail = StatusFail, "timeout / unreachable"
+		// Причина лежит в GetLastError: 11010 — молчание до конца бюджета,
+		// 1100x — сеть отказалась нести пакет. Прежнее «timeout / unreachable»
+		// одной строкой сваливало противоположные факты в кучу.
+		var code uint32
+		if errno, ok := callErr.(syscall.Errno); ok {
+			code = uint32(errno)
+		}
+		r.Status, r.Detail, r.Outcome = StatusFail, pingDetail(code), pingOutcome(code)
 		return r
 	}
 	reply := (*icmpEchoReply)(unsafe.Pointer(&buf[0]))
 	if reply.Status != 0 { // 0 == IP_SUCCESS
-		r.Status, r.Detail = StatusFail, fmt.Sprintf("icmp status %d", reply.Status)
+		// Ответивший роутер кладёт код прямо в reply.Status — класс тот же.
+		r.Status, r.Detail, r.Outcome = StatusFail, pingDetail(reply.Status), pingOutcome(reply.Status)
 		return r
 	}
 	// точность IcmpSendEcho — миллисекунды; для локалхоста RTT будет 0
 	r.Latency = time.Duration(reply.RoundTripTime) * time.Millisecond
-	r.Status = StatusOK
+	r.Status, r.Outcome = StatusOK, OutOK
 	return r
+}
+
+// pingOutcome — класс исхода по коду из ipexport.h (константы объявлены
+// в trace_windows.go). Молчание и unreachable — противоположные факты:
+// первое означает «пакет ушёл и не вернулся», второе — «сеть отказалась
+// его нести», и диагнозы у них разные.
+func pingOutcome(code uint32) Outcome {
+	switch code {
+	case ipReqTimedOut:
+		return OutTimeout
+	case ipDestNetUnreachable, ipDestHostUnreachable, ipDestProtUnreachable,
+		ipDestPortUnreachable, ipDestNoRoute:
+		return OutUnreach
+	}
+	return OutOther
+}
+
+func pingDetail(code uint32) string {
+	switch pingOutcome(code) {
+	case OutTimeout:
+		return "timeout"
+	case OutUnreach:
+		return "unreachable"
+	}
+	return fmt.Sprintf("icmp status %d", code)
 }

@@ -1,5 +1,5 @@
 import './style.css';
-import {RunCheck, GetHistory, GetRun, GetConfig, SaveConfig, CurrentLang, SetLang, Version,
+import {RunCheck, CancelCheck, GetHistory, GetRun, GetConfig, SaveConfig, CurrentLang, SetLang, Version,
   ListFonts, FontCSS, ApplyWindowScale, Catalog, Presets, SetServices,
   DeleteRuns, ClearHistory, SetTab as saveTab} from '../wailsjs/go/main/App';
 import {EventsOn} from '../wailsjs/runtime/runtime';
@@ -16,9 +16,13 @@ const state = {
   history: [],        // history.Entry[]
   version: '',
   running: false,
+  canceling: false,   // нажали «Отменить», ждём, пока бэкенд дожуёт текущую пробу
+  progress: null,     // {done, total} — счётчик «N из M» на кнопке
+  configError: null,  // конфиг не прочитался (текст ошибки с бэкенда)
   doneLayers: new Set(),
   selectedAt: '',     // какой прогон сейчас показан (RFC3339)
   error: null,
+  histError: null,    // ошибка операций с историей (ключ i18n) — живёт у панели истории
   fonts: null,        // установленные семейства, подгружаются при открытии настроек
   tab: 'report',      // активная вкладка: 'report' | 'services' | 'map'
   catalog: [],        // catalog.Item[] — справочник на текущем языке
@@ -225,6 +229,11 @@ function renderTally() {
 
   const svc = rep.services || [];
   const live = svc.filter(s => s.directOk).length;
+  // Счётчик молча означал «напрямую», а читался как «у тебя работает 7 из 25».
+  // У человека с включённым VPN это прямая дезинформация: его трафик идёт
+  // через VPN, где открывается втрое больше. Раз замер через VPN сделан —
+  // показываем оба числа и подписываем, какое из них какое.
+  const viaVPN = svc.some(s => s.proxyTried) ? svc.filter(s => s.proxyOk).length : null;
 
   const cell = (cls, n, key) =>
     n ? `<span class="tc ${cls}"><b>${n}</b>${esc(t(key))}</span>` : '';
@@ -236,7 +245,12 @@ function renderTally() {
     (c.fail ? `<span class="tc fail"><b>${c.fail}</b>${esc(pl(c.fail, 'cnt.fails'))}</span>` : '') +
     cell('skip', c.skip, 'tally.skip');
   if (svc.length) {
-    html += `<span class="tc svc">${esc(t('tally.services'))} <b>${live}</b><i>/${svc.length}</i></span>`;
+    html += `<span class="tc svc">${esc(t('tally.services'))} <b>${live}</b><i>/${svc.length}</i>` +
+      (viaVPN === null ? '' : `<em>${esc(t('tally.direct'))}</em>`) + `</span>`;
+    if (viaVPN !== null) {
+      html += `<span class="tc svc"><b>${viaVPN}</b><i>/${svc.length}</i>` +
+        `<em>${esc(t('tally.via_vpn'))}</em></span>`;
+    }
   }
   el.innerHTML = html;
 }
@@ -296,7 +310,8 @@ function rowHTML(r) {
     `<td class="mth">${esc(r.method)}</td>` +
     `<td class="${isProxy ? 'path px' : 'path'}">${pathTxt}</td>` +
     `<td class="ms">${fmtDur(r.latency)}</td>` +
-    `<td class="res"><span class="st ${stc}">${stc.toUpperCase()}</span>` +
+    // title дублирует detail целиком: ellipsis прячет самое информативное поле
+    `<td class="res"${why ? ` title="${why}"` : ''}><span class="st ${stc}">${stc.toUpperCase()}</span>` +
     (why ? ` <span class="why">${why}</span>` : '') + `</td>`;
 }
 
@@ -387,12 +402,15 @@ function renderHistory() {
   const panel = bd.closest('.hist');
   if (panel) panel.classList.toggle('busy', state.running);
   $('hist-clear').classList.toggle('hidden', !h.length);
+  // ошибка истории показывается здесь же, у панели, — вердикт она не трогает
+  const errH = state.histError
+    ? `<div class="hist-err">${esc(t(state.histError))}</div>` : '';
   if (!h.length) {
-    bd.innerHTML = `<div class="empty">${esc(t('hist.empty'))}</div>`;
+    bd.innerHTML = errH + `<div class="empty">${esc(t('hist.empty'))}</div>`;
     return;
   }
   const tip = state.running ? t('hist.busy') : t('hist.open');
-  bd.innerHTML = h.map(e => {
+  bd.innerHTML = errH + h.map(e => {
     const cls = stChip(e.status);
     const sel = sameRun(e.at, state.selectedAt) ? ' cur' : '';
     return `<div class="hrow ${cls}${sel}" data-at="${esc(e.at)}" title="${esc(tip)}">` +
@@ -401,7 +419,16 @@ function renderHistory() {
       `<button class="hdel" title="${esc(t('hist.del'))}">✕</button></div>`;
   }).join('');
   bd.querySelectorAll('.hrow').forEach(row => {
-    row.addEventListener('click', () => { if (!state.running) loadRun(row.dataset.at); });
+    row.addEventListener('click', async () => {
+      if (state.running) return;
+      // Битая запись раньше «не работала» молча: loadRun возвращал false,
+      // и клик выглядел как зависание. Теперь об этом сказано у панели.
+      state.histError = null;
+      if (!await loadRun(row.dataset.at)) {
+        state.histError = 'hist.err.load';
+        renderHistory();
+      }
+    });
     row.querySelector('.hdel').addEventListener('click', e => {
       e.stopPropagation(); // иначе удаление заодно откроет удаляемый прогон
       if (!state.running) queueHist(() => removeRuns([row.dataset.at]));
@@ -419,13 +446,15 @@ let histOp = Promise.resolve();
 const queueHist = fn => (histOp = histOp.then(fn, fn));
 
 async function removeRuns(ats) {
-  state.error = null;
+  // ошибка идёт в своё поле: писать её в state.error значило бы стереть
+  // вердикт и показать «Ошибку прогона», которой не было
+  state.histError = null;
   try {
     if (ats === null) await ClearHistory();
     else await DeleteRuns(ats);
   } catch (e) {
     console.error(e);
-    state.error = t('hist.err');
+    state.histError = 'hist.err';
   }
   try { state.history = await GetHistory() || []; } catch (e) { console.error(e); }
   const gone = ats === null || ats.some(at => sameRun(at, state.selectedAt));
@@ -462,19 +491,40 @@ function armClear(on) {
     : t('hist.clear.title');
 }
 
+// progressText — подпись под кнопкой во время прогона: счётчик «N из M»,
+// пока он не пришёл — просто «идёт проверка…».
+function progressText() {
+  const p = state.progress;
+  if (!p || !p.total) return t('btn.sub.running');
+  return t('btn.progress').replace('%n', p.done).replace('%t', p.total);
+}
+
 function updateButton() {
   const btn = $('btn-run');
-  btn.disabled = state.running;
+  // Во время прогона кнопка живёт: она превращается в «Отменить».
+  // Гаснет она только после нажатия отмены — второй раз отменять нечего.
+  btn.disabled = state.canceling;
+  btn.classList.toggle('cancel', state.running);
   // Настройки посреди прогона меняют язык и перечитывают конфиг, а это
   // ломает состояние живой таблицы: половина строк остаётся на прежнем
   // языке, вторая приходит на новом.
   $('gear').disabled = state.running;
-  $('btn-label').textContent = state.running ? t('btn.running') : t('btn.run');
+  $('btn-label').textContent = !state.running ? t('btn.run')
+    : state.canceling ? t('btn.canceling') : t('btn.cancel');
   const last = (state.history || [])[0];
   $('btn-sub').textContent = state.running
-    ? t('btn.sub.running')
+    ? progressText()
     : (last ? `${t('btn.lastrun')} — ${fmtWhen(last.at)} · ${fmtDur(last.duration)}`
             : t('btn.norun'));
+}
+
+// renderConfigError — тихая строка под кнопкой: конфиг не прочитался,
+// прогон идёт с настройками по умолчанию. Вердикт она не трогает.
+function renderConfigError() {
+  const el = $('cfg-err');
+  el.classList.toggle('hidden', !state.configError);
+  el.textContent = state.configError ? t('cfg.err') : '';
+  el.title = state.configError || '';
 }
 
 function updateSubline() {
@@ -527,6 +577,19 @@ async function persistServices() {
   state.cfg = await GetConfig();
 }
 
+// persistAndRender — сохранить выбор и перерисовать. Раньше падение
+// SetServices оставляло промис без catch, а галочки — в состоянии, которого
+// нет в конфиге; теперь при ошибке выбор откатывается к сохранённому.
+async function persistAndRender() {
+  try {
+    await persistServices();
+  } catch (e) {
+    console.error(e);
+    try { await loadCatalog(); } catch (e2) { console.error(e2); }
+  }
+  renderServices();
+}
+
 function svcMatches(host, name, note) {
   const q = state.svcQuery.trim().toLowerCase();
   if (!q) return true;
@@ -576,30 +639,27 @@ function renderServices() {
   $('svc-groups').innerHTML = html;
 
   $('svc-groups').querySelectorAll('input[data-id]').forEach(el => {
-    el.addEventListener('change', async () => {
+    el.addEventListener('change', () => {
       if (el.checked) state.picked.add(el.dataset.id);
       else state.picked.delete(el.dataset.id);
-      await persistServices();
-      renderServices();
+      persistAndRender();
     });
   });
   $('svc-groups').querySelectorAll('.svc-all').forEach(btn => {
-    btn.addEventListener('click', async () => {
+    btn.addEventListener('click', () => {
       for (const s of state.catalog) {
         if (s.group !== btn.dataset.grp || !svcMatches(s.host, s.name, s.note)) continue;
         if (btn.dataset.off) state.picked.delete(s.id);
         else state.picked.add(s.id);
       }
-      await persistServices();
-      renderServices();
+      persistAndRender();
     });
   });
   $('svc-groups').querySelectorAll('.svc-del').forEach(btn => {
-    btn.addEventListener('click', async e => {
+    btn.addEventListener('click', e => {
       e.preventDefault();
       state.custom.splice(Number(btn.dataset.idx), 1);
-      await persistServices();
-      renderServices();
+      persistAndRender();
     });
   });
 }
@@ -608,22 +668,39 @@ async function applyPreset(name) {
   if (name === 'none') state.picked = new Set();
   else if (name === 'all') state.picked = new Set(state.catalog.map(s => s.id));
   else state.picked = new Set(state.presets[name] || []);
-  await persistServices();
-  renderServices();
+  await persistAndRender();
+}
+
+// hostOk — грубая проверка имени хоста: латиница/цифры, точки и дефисы,
+// метка не начинается и не кончается дефисом.
+const hostOk = h =>
+  /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i.test(h);
+
+// showSvcErr — ошибка под формой добавления; null прячет её
+function showSvcErr(key) {
+  const el = $('svc-err');
+  el.textContent = key ? t(key) : '';
+  el.classList.toggle('hidden', !key);
 }
 
 async function addCustomTarget() {
   const raw = $('svc-host').value.trim()
     .replace(/^[a-z+.-]+:\/\//i, '').replace(/\/.*$/, '');
   if (!raw) return;
+  // Молча чистить поле при опечатке — значит делать вид, что цель добавлена.
+  // Кириллический домен просим ввести в punycode, остальное — поправить.
+  if (!hostOk(raw)) {
+    showSvcErr(/[^\x00-\x7f]/.test(raw) ? 'svc.err.idn' : 'svc.err.host');
+    return;
+  }
+  showSvcErr(null);
   const group = $('svc-group').value;
   // уже есть в справочнике — не плодим дубль, просто отмечаем
   const known = state.catalog.find(s => s.host === raw);
   if (known) state.picked.add(known.id);
   else if (!state.custom.some(c => c.host === raw)) state.custom.push({host: raw, group});
   $('svc-host').value = '';
-  await persistServices();
-  renderServices();
+  await persistAndRender();
 }
 
 /* ──────────────── карта ──────────────── */
@@ -749,6 +826,7 @@ function renderMap() {
 function renderAll() {
   updateSubline();
   updateButton();
+  renderConfigError();
   renderEnv();
   renderChain();
   renderVerdict();
@@ -772,6 +850,9 @@ function resetRunUI() {
   state.liveFor = '';
   state.stick = true;
   state.error = null;
+  state.histError = null; // прошлая ошибка истории к новому прогону не относится
+  state.canceling = false;
+  state.progress = null;
   state.collecting = true;
   group = {layer: null, tr: null, worst: 'ok'};
 
@@ -783,25 +864,54 @@ function resetRunUI() {
   renderMap();       // лучи и сводка прошлого прогона тоже не наши
 }
 
+// isBusyStub — пустой Report с нулевым временем: бэкенд уже гоняет прогон
+// (наш промис RunCheck потерян перезагрузкой страницы), второй не начат.
+// Итог того прогона придёт событием "done".
+const isBusyStub = rep =>
+  !rep || !rep.startedAt || new Date(rep.startedAt).getTime() <= 0;
+
+// finishRun — единый финал прогона. Зовётся дважды: из промиса RunCheck и
+// из события "done" (для фронта, пережившего перезагрузку); кто первый
+// успел — тот и закрыл, второй вызов — no-op.
+async function finishRun(rep) {
+  if (!state.running) return;
+  state.running = false;
+  state.canceling = false;
+  if (rep) {
+    state.report = rep;
+    if (rep.env) state.env = rep.env;
+    state.selectedAt = rep.startedAt || '';
+    state.liveFor = rep.startedAt || '';
+  }
+  try { state.history = await GetHistory() || []; } catch (e) { console.error(e); }
+  state.collecting = false; // всё, что могло прийти, пришло
+  renderAll();
+}
+
 async function run() {
   if (state.running) return;
   state.running = true;
   resetRunUI();
 
+  let rep = null;
   try {
-    const rep = await RunCheck();
-    state.report = rep;
-    if (rep && rep.env) state.env = rep.env;
-    state.selectedAt = (rep && rep.startedAt) || '';
-    state.liveFor = (rep && rep.startedAt) || '';
+    rep = await RunCheck();
   } catch (e) {
     state.error = (e && e.message) ? e.message : String(e);
+    await finishRun(null);
+    return;
   }
-  state.running = false;
+  if (isBusyStub(rep)) return; // прогон уже шёл — итог придёт событием "done"
+  await finishRun(rep);
+}
 
-  try { state.history = await GetHistory() || []; } catch (e) { console.error(e); }
-  state.collecting = false; // всё, что могло прийти, пришло
-  renderAll();
+// cancelRun — «Отменить» нажато: кнопка гаснет с «останавливаю…», бэкенд
+// рвёт контекст прогона, а итог всё равно приходит обычным путём.
+function cancelRun() {
+  if (!state.running || state.canceling) return;
+  state.canceling = true;
+  updateButton();
+  CancelCheck().catch(e => console.error(e));
 }
 
 /* ──────────────── настройки ──────────────── */
@@ -925,8 +1035,21 @@ async function switchLang(l) {
 
 async function init() {
   EventsOn('env', snap => { state.env = snap; renderEnv(); });
+  // конфиг не прочитался — прогон идёт с дефолтами, об этом сказано тихо
+  EventsOn('config-error', msg => {
+    state.configError = String(msg || 'config');
+    renderConfigError();
+  });
+  // Финал прогона, промис которого потерян перезагрузкой страницы:
+  // без этого события такой фронт не дожил бы до отчёта.
+  EventsOn('done', rep => { finishRun(rep); });
   EventsOn('progress', p => {
     if (!p || !p.layer) return;
+    // тик счётчика целей — только цифры на кнопке, в таблицу ему нечего
+    if (p.total) {
+      state.progress = {done: p.checked || 0, total: p.total};
+      if (state.running) $('btn-sub').textContent = progressText();
+    }
     if (p.result) {
       // Очередная проба ответила — строка уходит в таблицу немедленно.
       // Признак «собираем» держится дольше, чем «идёт прогон»: последние
@@ -961,7 +1084,11 @@ async function init() {
   // последний прогон переживает перезапуск — показываем его сразу
   await loadRun('');
 
-  $('btn-run').addEventListener('click', run);
+  // во время прогона та же кнопка — «Отменить»
+  $('btn-run').addEventListener('click', () => {
+    if (state.running) cancelRun();
+    else run();
+  });
 
   // автопрокрутка живой таблицы держится, пока человек не отлистал вверх
   const tbd = $('tbody').closest('.bd');
@@ -994,6 +1121,8 @@ async function init() {
   $('svc-host').addEventListener('keydown', e => {
     if (e.key === 'Enter') addCustomTarget();
   });
+  // человек начал править адрес — старая ошибка больше не про этот ввод
+  $('svc-host').addEventListener('input', () => showSvcErr(null));
 
   $('gear').addEventListener('click', openSettings);
   $('set-cancel').addEventListener('click', closeSettings);

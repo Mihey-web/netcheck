@@ -80,6 +80,13 @@ type Result struct {
 	Server      string `json:"server,omitempty"`
 	CFMitigated string `json:"cfMitigated,omitempty"`
 	Body        string `json:"body,omitempty"` // первые 256 байт
+	// Challenge — вместо страницы пришла проверка «я не робот».
+	//
+	// Это не блокировка и вообще не отказ: сервер ответил, путь до него
+	// чист, и в браузере сайт открывается — проверку решает браузер.
+	// Наш клиент решить её не может в принципе, поэтому единственный
+	// честный вывод здесь — «проверить не удалось», а не «не работает».
+	Challenge bool `json:"challenge,omitempty"`
 	// SNI — какое имя предъявляли в рукопожатии (для лестницы нейтральных).
 	SNI  string    `json:"sni,omitempty"`
 	Cert *CertInfo `json:"cert,omitempty"`

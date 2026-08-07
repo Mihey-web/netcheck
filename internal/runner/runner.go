@@ -5,6 +5,7 @@ package runner
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"net/url"
 	"strings"
@@ -88,6 +89,11 @@ type Progress struct {
 	Layer  string        `json:"layer"`
 	Done   bool          `json:"done,omitempty"`
 	Result *probe.Result `json:"result,omitempty"`
+	// Checked/Total — счётчик «N из M» целей для кнопки: сколько целей
+	// уже получили итог и сколько их всего в этом прогоне. Событие с этими
+	// полями (и без Result/Done) — просто тик счётчика.
+	Checked int `json:"checked,omitempty"`
+	Total   int `json:"total,omitempty"`
 }
 
 // captiveURL — контрольный запрос по обычному HTTP. Ровно им пользуется сам
@@ -140,6 +146,10 @@ type Report struct {
 	Verdict   verdict.Verdict          `json:"verdict"`
 	// Aborted — прогон оборван на нижнем слое: дальше проверять было нечего.
 	Aborted bool `json:"aborted,omitempty"`
+	// Canceled — прогон прерван снаружи (кнопка «Отменить», закрытие окна
+	// или общий таймаут): замеры неполные, вердикт по ним не строится
+	// и в историю такой прогон не пишется.
+	Canceled bool `json:"canceled,omitempty"`
 	// Captive — что показал контрольный HTTP-запрос, когда не открылся
 	// ни один сайт: "portal" (ответ подменён страницей входа), "open"
 	// (наружу ходим, а сайты не открываются) или "" (не ответил никто).
@@ -154,6 +164,9 @@ type Report struct {
 	// Заполняются только при включённой настройке map.geo_lookup.
 	GeoDirect *geo.Info `json:"geoDirect,omitempty"`
 	GeoProxy  *geo.Info `json:"geoProxy,omitempty"`
+	// GeoDataDate — дата выпуска вшитой геобазы (YYYY-MM-DD): по ней UI
+	// сможет предупредить, что подписи карты собраны по устаревшим данным.
+	GeoDataDate string `json:"geoDataDate,omitempty"`
 }
 
 // Relocalize пересобирает вердикт сохранённого отчёта на другом языке.
@@ -162,7 +175,29 @@ func Relocalize(rep Report, l i18n.Lang) Report {
 	rep.Verdict = verdict.Build(l, verdict.Input{
 		Env: rep.Env, Layers: rep.Layers, Services: rep.Services, Captive: rep.Captive,
 	})
+	// Лучи копируем перед локализацией: Report пришёл по значению, но срез
+	// внутри общий, и запись Note в него портила бы отчёт вызывающего.
+	rep.Routes = append([]geo.Route(nil), rep.Routes...)
+	localizeRoutes(rep.Routes, l)
 	return rep
+}
+
+// localizeRoutes собирает подписи карты из кодов причин — тем же манером,
+// каким verdict собирает текст из message-id. Старые отчёты в истории несут
+// готовый Note без кода: их не трогаем, честнее оставить строку языка прогона,
+// чем стереть объяснение.
+func localizeRoutes(routes []geo.Route, l i18n.Lang) {
+	for i := range routes {
+		r := &routes[i]
+		if r.NoteID == "" {
+			continue
+		}
+		args := make([]any, len(r.NoteArgs))
+		for j, a := range r.NoteArgs {
+			args[j] = a
+		}
+		r.Note = i18n.T(l, r.NoteID, args...)
+	}
 }
 
 type collector struct {
@@ -225,6 +260,35 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 		live(layer, rs...)
 	}
 
+	// Счётчик «N из M» для кнопки: цель — это шлюз, DNS и каждый проверяемый
+	// хост. Тик уходит, когда по цели готов итог, а не когда её начали.
+	totalTargets := 2 + len(cfg.Targets.Runet) + len(cfg.Targets.Global) +
+		len(cfg.Targets.Blocked) + len(cfg.Targets.GeoBlocked)
+	var tickMu sync.Mutex
+	ticked := 0
+	tick := func(layer string) {
+		tickMu.Lock()
+		ticked++
+		n := ticked
+		tickMu.Unlock()
+		emit(Progress{Layer: layer, Checked: n, Total: totalTargets})
+	}
+
+	// canceled — отмена между слоями. Каждый замер после отмены лишь
+	// пересказывал бы умерший контекст таймаутами, а вердикт из таких
+	// «замеров» («Интернета нет» из-за нажатой кнопки) — выдумка.
+	canceled := func(next string) (Report, bool) {
+		if runCtx.Err() == nil {
+			return Report{}, false
+		}
+		rep.Canceled = true
+		var skipped []verdict.LayerStatus
+		if next != "" {
+			skipped = skipFrom(next, report)
+		}
+		return finish(&rep, col, started, lang, skipped), true
+	}
+
 	// ── слой 1: шлюз ─────────────────────────────────────────────
 	gwStatus := probe.StatusOK
 	if cfg.Ping.Gateway {
@@ -256,12 +320,16 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 		}
 	}
 	rep.Layers = append(rep.Layers, verdict.LayerStatus{Layer: "gateway", Status: gwStatus})
+	tick("gateway")
 	report("gateway")
 
 	// Связи нет от слова совсем: всё, что выше, показало бы одинаковый «fail»
 	// и только сбивало бы с толку. Помечаем остальные слои непроверенными.
 	if gwStatus == probe.StatusFail {
 		return finish(&rep, col, started, lang, skipFrom("dns", report))
+	}
+	if r, ok := canceled("dns"); ok {
+		return r
 	}
 
 	// ── слой 2: DNS тремя путями ─────────────────────────────────
@@ -290,20 +358,26 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 			udpRes = p.ResolveUDP(c, dnsProbe, "8.8.8.8:53")
 			live("dns", udpRes)
 		}()
+		// Каждая попытка DoH — в отчёт и на экран, как в checkBlocked.
+		// Раньше запоминалась только последняя, и неудача Cloudflare
+		// молча исчезала под удачей Google.
+		var dohAll []probe.Result
 		go func() {
 			defer wg.Done()
 			for _, ep := range dohEndpoints {
 				c, cancelProbe := withTimeout()
 				dohRes = p.ResolveDoH(c, dnsProbe, ep)
 				cancelProbe()
+				dohAll = append(dohAll, dohRes)
+				live("dns", dohRes)
 				if dohRes.Status == probe.StatusOK {
 					break
 				}
 			}
-			live("dns", dohRes)
 		}()
 		wg.Wait()
-		col.add(sysRes, udpRes, dohRes)
+		col.add(sysRes, udpRes)
+		col.add(dohAll...)
 		sysIPs = sysRes.IPs
 		// Расхождение системного ответа с DoH подменой НЕ является: у любого
 		// CDN это обычный GeoDNS, и раньше именно оно вешало на каждый прогон
@@ -344,19 +418,26 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 		}
 	}
 	rep.Layers = append(rep.Layers, verdict.LayerStatus{Layer: "dns", Status: dnsStatus})
+	tick("dns")
 	report("dns")
+	if r, ok := canceled("runet"); ok {
+		return r
+	}
 
 	// ── слои 3–4: рунет и заграница ──────────────────────────────
-	runetStatus := checkZone(p, col, withTimeout, cfg.Targets.Runet, "runet", live)
+	runetStatus := checkZone(p, col, withTimeout, cfg.Targets.Runet, "runet", live, tick)
 	rep.Layers = append(rep.Layers, verdict.LayerStatus{Layer: "runet", Status: runetStatus})
 	report("runet")
+	if r, ok := canceled("global"); ok {
+		return r
+	}
 
 	if cfg.Ping.GlobalIP != "" {
 		c, cancelProbe := withTimeout()
 		add("global", p.Ping(c, cfg.Ping.GlobalIP))
 		cancelProbe()
 	}
-	globalStatus := checkZone(p, col, withTimeout, cfg.Targets.Global, "global", live)
+	globalStatus := checkZone(p, col, withTimeout, cfg.Targets.Global, "global", live, tick)
 
 	// Не открылось ничего — ни здесь, ни за границей. Прежде чем говорить
 	// «интернета нет», один контрольный запрос по обычному HTTP: он отличает
@@ -377,6 +458,9 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 	}
 	rep.Layers = append(rep.Layers, verdict.LayerStatus{Layer: "global", Status: globalStatus})
 	report("global")
+	if r, ok := canceled("blocked"); ok {
+		return r
+	}
 
 	// Сеть мертва до самого верха: проверять по отдельности два десятка
 	// сервисов бессмысленно. Каждый дал бы тот же таймаут, прогон растянулся
@@ -396,12 +480,19 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 			mapWG.Add(1)
 			go func() {
 				defer mapWG.Done()
+				// Ошибка — в лог, а не в никуда: молча проглоченная, она
+				// выглядела как «гео просто не определилось», и отличить
+				// сбой сервиса от выключенной настройки было нечем.
 				if info, err := geo.Lookup(runCtx, nil); err == nil {
 					rep.GeoDirect = info
+				} else {
+					log.Printf("geo.Lookup напрямую: %v", err)
 				}
 				if proxyURL != nil {
 					if info, err := geo.Lookup(runCtx, proxyURL); err == nil {
 						rep.GeoProxy = info
+					} else {
+						log.Printf("geo.Lookup через прокси: %v", err)
 					}
 				}
 			}()
@@ -423,6 +514,7 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 			outs[i] = checkBlocked(p, withTimeout, host, proxyURL, func(r probe.Result) {
 				live("blocked", r)
 			})
+			tick("blocked")
 		}(i, host)
 	}
 	wg.Wait()
@@ -442,6 +534,9 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 	}
 	rep.Layers = append(rep.Layers, verdict.LayerStatus{Layer: "blocked", Status: blockedStatus})
 	report("blocked")
+	if r, ok := canceled(""); ok {
+		return r
+	}
 
 	// Ждём геолокацию до трассировок: её координаты — точка отсчёта, от которой
 	// считается, успел бы свет до очередного шага или база опять соврала.
@@ -453,7 +548,17 @@ func Run(ctx context.Context, cfg config.Config, lang i18n.Lang, p Prober, snap 
 		traceCtx, cancelTrace := context.WithTimeout(ctx, traceBudget)
 		rep.Routes = traceRoutes(traceCtx, p, outs, rep.GeoDirect)
 		cancelTrace()
+		localizeRoutes(rep.Routes, lang)
+		// Дата выпуска геобазы — в отчёт: без неё устаревшая на годы база
+		// неотличима от свежей, и UI нечем предупредить пользователя.
+		rep.GeoDataDate = data.ReleaseDate()
 	}
+	// Отмена в самом хвосте (во время трассировок): пользователь попросил
+	// остановиться — прогон честно считается прерванным, даже если слои успели.
+	// Смотрим на внешний ctx, а не на runCtx: трассировки живут на своём
+	// бюджете дольше RunMs, и истёкший таймаут прогона здесь — норма,
+	// а не отмена.
+	rep.Canceled = ctx.Err() != nil
 	return finish(&rep, col, started, lang, nil)
 }
 
@@ -486,9 +591,19 @@ func finish(rep *Report, col *collector, started time.Time, lang i18n.Lang, skip
 		rep.Aborted = true
 	}
 	rep.Results = col.results
-	rep.Verdict = verdict.Build(lang, verdict.Input{
-		Env: rep.Env, Layers: rep.Layers, Services: rep.Services, Captive: rep.Captive,
-	})
+	if rep.Canceled {
+		// Отменённый прогон — не диагноз. Половина проверок не выполнялась,
+		// а оставшиеся умерли вместе с контекстом; строить по ним вердикт
+		// значило бы выдавать «Интернета нет» за итог нажатой «Отменить».
+		rep.Verdict = verdict.Verdict{
+			Lines: []string{i18n.T(lang, "verdict.canceled")},
+			Chain: rep.Layers,
+		}
+	} else {
+		rep.Verdict = verdict.Build(lang, verdict.Input{
+			Env: rep.Env, Layers: rep.Layers, Services: rep.Services, Captive: rep.Captive,
+		})
+	}
 	rep.Duration = time.Since(started)
 	if rep.Duration <= 0 {
 		rep.Duration = time.Nanosecond
@@ -503,7 +618,14 @@ func finish(rep *Report, col *collector, started time.Time, lang i18n.Lang, skip
 const maxParallelTraces = 12
 
 // traceBudget — сколько времени отводится на всю карту.
-const traceBudget = 6 * time.Second
+//
+// Одна трассировка в худшем случае стоит таймаут шага (1.5 с) плюс паузы
+// между волнами, плюс перепроверку развилок (0.7 с), плюс обратные запросы
+// имён (0.9 с) — около трёх с половиной секунд. Стандартный набор целей идёт
+// в две волны по двенадцать, отсюда девять: при шести секундах вторая волна
+// обрывалась бы на полпути и половина карты оказывалась пустой без всякого
+// объяснения.
+const traceBudget = 9 * time.Second
 
 // traceRoutes строит лучи до проверенных целей.
 //
@@ -534,9 +656,12 @@ func traceRoutes(ctx context.Context, p Prober, outs []blockedOutcome, direct *g
 
 			hops, err := p.Trace(ctx, ip)
 			if err != nil {
+				// Код причины, а не готовая строка: подпись соберёт i18n
+				// на языке пользователя — в том числе при смене языка
+				// поверх сохранённой истории (Relocalize).
 				routes[i] = geo.Route{
 					Host: host, TargetIP: ip, ServiceOK: serviceOK,
-					Note: "трассировка не отработала: " + err.Error(),
+					NoteID: "map.note.trace_failed", NoteArgs: []string{err.Error()},
 				}
 				return
 			}
@@ -558,7 +683,7 @@ func traceRoutes(ctx context.Context, p Prober, outs []blockedOutcome, direct *g
 // Пустой список целей — не «зона в порядке», а «нечего было спрашивать»:
 // такую зону вердикт обязан считать непроверенной, а не работающей.
 func checkZone(p Prober, col *collector, withTimeout func() (context.Context, context.CancelFunc),
-	hosts []string, layer string, live func(string, ...probe.Result)) probe.Status {
+	hosts []string, layer string, live func(string, ...probe.Result), tick func(string)) probe.Status {
 	if len(hosts) == 0 {
 		return probe.StatusSkip
 	}
@@ -572,6 +697,7 @@ func checkZone(p Prober, col *collector, withTimeout func() (context.Context, co
 			defer cancel()
 			results[i] = p.HTTPGet(c, "https://"+h, nil, "")
 			live(layer, results[i])
+			tick(layer)
 		}(i, h)
 	}
 	wg.Wait()
@@ -695,11 +821,28 @@ func checkBlocked(p Prober, withTimeout func() (context.Context, context.CancelF
 	cancel()
 	keep(ev.HTTP)
 
-	// Редирект на чужой домен успехом не считается: именно так выглядит
-	// заглушка провайдера. Прежде она проходила как «сервис работает»,
-	// и разбор заглушек в analyze оставался мёртвым кодом.
-	directOK := ev.HTTP.Status == probe.StatusOK && !isRefusal(ev.HTTP) &&
-		(ev.HTTP.Code < 300 || probe.SameSite(host, ev.HTTP.Location))
+	// Редирект на чужой домен здесь успехом считается, и это принципиально.
+	//
+	// Сюда мы попадаем только после успешного рукопожатия с настоящим именем
+	// (ev.TLSReal выше), то есть сертификат проверен и выписан на этот самый
+	// хост. Заглушка провайдера такого предъявить не может — для этого ей
+	// нужен доверенный сертификат на чужое имя, а это уже не заглушка,
+	// а подмена, и её ловит отдельная проверка (CauseMITM).
+	//
+	// Значит, 302 с проверенного сертификата — ответ настоящего сервера,
+	// какой бы домен в нём ни стоял. Прежнее правило «чужой домен — заглушка»
+	// объявляло сломанным claude.ai, который отвечает штатным редиректом
+	// на www.anthropic.com, — и пользователь читал «claude.ai не работает»,
+	// разговаривая через него же.
+	//
+	// Настоящие заглушки провайдеры ставят на голом HTTP, порт 80. Мы туда
+	// не ходим вовсе, так что разбор заглушек в analyze до этого замера
+	// не достаёт — честнее признать это, чем ловить их правилом,
+	// которое врёт на живых сервисах.
+	// Проверка «я не робот» — не поломка: сервер ответил, путь чист,
+	// в браузере сайт откроется. Записывать его в недоступные нельзя,
+	// но и молча объявлять рабочим тоже: мы его не проверили.
+	directOK := (ev.HTTP.Status == probe.StatusOK || ev.HTTP.Challenge) && !isRefusal(ev.HTTP)
 	proxyOK := false
 	// Контрольный замер через прокси — не роскошь, а единственный способ
 	// отличить геоблок от антибота: тот же 403 из другой страны означает
@@ -717,6 +860,7 @@ func checkBlocked(p Prober, withTimeout func() (context.Context, context.CancelF
 
 	out.sv = verdict.ServiceVerdict{
 		Host: host, DirectOK: directOK, ProxyOK: proxyOK, ProxyTried: ev.ProxyTried,
+		Challenged: ev.HTTP.Challenge,
 	}
 	if !directOK {
 		out.sv.Cause = analyze.Diagnose(ev)
@@ -726,7 +870,14 @@ func checkBlocked(p Prober, withTimeout func() (context.Context, context.CancelF
 
 // isRefusal — сервер ответил, но отказом (403/429/451). Формально HTTP-проба
 // удалась, для пользователя сервис не работает.
+// isRefusal — сервер ответил отказом. Проверка «я не робот» приходит с тем же
+// кодом 403, но отказом не является: сервер как раз готов пустить, просто
+// требует доказать, что ты браузер. Считать её отказом значило записывать
+// в недоступные сайты, которые у пользователя открываются.
 func isRefusal(r probe.Result) bool {
+	if r.Challenge {
+		return false
+	}
 	return r.Code == 403 || r.Code == 429 || r.Code == 451
 }
 
@@ -766,9 +917,3 @@ func firstProxyURL(s env.Snapshot) *url.URL {
 	return nil
 }
 
-func firstOr[T any](s []T, def T) T {
-	if len(s) > 0 {
-		return s[0]
-	}
-	return def
-}

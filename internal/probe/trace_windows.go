@@ -42,10 +42,12 @@ const (
 // Trace — трассировка до адреса через IcmpSendEcho с заданным TTL.
 // Прав администратора не требует, в отличие от raw-сокетов.
 //
-// Все шаги опрашиваются одновременно, а не по очереди. Последовательная
-// трассировка до недостижимой цели стоила бы двадцать таймаутов подряд —
-// полминуты на одну цель, при том что весь прогон укладывается в двадцать
-// секунд. Параллельно это стоит один таймаут.
+// Шаги опрашиваются не по очереди, а волнами по traceWave штук.
+// Последовательная трассировка до недостижимой цели стоила бы двадцать
+// таймаутов подряд — полминуты на одну цель, при том что весь прогон
+// укладывается в двадцать секунд. Волнами это стоит один таймаут плюс
+// несколько пауз, зато роутеры не принимают залп за всплеск и не режут
+// ответы ограничителем частоты.
 func Trace(ctx context.Context, ip string) ([]Hop, error) {
 	parsed := net.ParseIP(ip)
 	if parsed == nil || parsed.To4() == nil {
@@ -69,6 +71,16 @@ func Trace(ctx context.Context, ip string) ([]Hop, error) {
 		wg.Add(1)
 		go func(ttl int) {
 			defer wg.Done()
+			// Волнами: пятый шаг ждёт 40 мс, десятый — 80 и так далее.
+			// Залп из двадцати пакетов разом роутеры принимают за всплеск
+			// и часть ответов придерживают.
+			if d := time.Duration((ttl-1)/traceWave) * traceGap; d > 0 {
+				select {
+				case <-time.After(d):
+				case <-ctx.Done():
+					return
+				}
+			}
 			hops[ttl-1] = probeTTL(target, uint8(ttl), timeout)
 		}(i + 1)
 	}
@@ -78,11 +90,60 @@ func Trace(ctx context.Context, ip string) ([]Hop, error) {
 		return nil, err
 	}
 	hops = TrimHops(hops)
+	verifyHops(ctx, target, hops)
 	// Имена роутеров спрашиваем один раз на весь маршрут и уже после
 	// трассировки: на замеры они не влияют, но именно по ним потом
 	// определяется, где роутер стоит на самом деле.
 	FillHostnames(ctx, hops)
 	return hops, nil
+}
+
+// verifyHops переспрашивает ответившие шаги ещё одним пакетом.
+//
+// Магистрали раскладывают потоки по нескольким параллельным линиям, и «шаг 7»
+// первого прохода и «шаг 7» второго — запросто две разные машины в двух разных
+// городах. Склеенный из таких шагов маршрут выглядит правдоподобно и при этом
+// не существует: именно так на карте появлялись зигзаги через полмира.
+//
+// Отличить развилку можно только повторным вопросом. Сменился адрес — шаг
+// помечается Ambiguous, и рисовать его точкой уже нельзя. Молчание на повтор
+// ничего не доказывает и ничего не меняет.
+func verifyHops(ctx context.Context, target uint32, hops []Hop) {
+	timeout := verifyBudget
+	if dl, ok := ctx.Deadline(); ok {
+		if left := time.Until(dl); left < timeout {
+			timeout = left
+		}
+	}
+	if timeout <= 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	order := 0
+	for i := range hops {
+		// Цель переспрашивать незачем: её адрес мы задали сами.
+		if !hops[i].Responded() || hops[i].Status == HopFinal {
+			continue
+		}
+		wg.Add(1)
+		go func(i, order int) {
+			defer wg.Done()
+			if d := time.Duration(order/traceWave) * traceGap; d > 0 {
+				select {
+				case <-time.After(d):
+				case <-ctx.Done():
+					return
+				}
+			}
+			again := probeTTL(target, uint8(hops[i].N), timeout)
+			if again.Responded() && again.IP != hops[i].IP {
+				hops[i].Ambiguous = true
+			}
+		}(i, order)
+		order++
+	}
+	wg.Wait()
 }
 
 func probeTTL(target uint32, ttl uint8, timeout time.Duration) Hop {

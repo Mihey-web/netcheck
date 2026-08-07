@@ -8,6 +8,8 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -65,9 +67,14 @@ func Detect(ctx context.Context, proxyPorts []int) Snapshot {
 	return s
 }
 
+// connectProbe — куда просим прокси установить туннель при классификации.
+// Тот же хост, что у контрольного captive-запроса runner'а: лёгкий и не
+// заблокированный из РФ.
+const connectProbe = "www.msftconnecttest.com:80"
+
 // classifyListener определяет, слушает ли 127.0.0.1:port прокси и какой:
-// сначала SOCKS5 method-selection, затем HTTP. Открытый порт с незнакомым
-// протоколом прокси НЕ считается (чтобы не путать чужие сервисы).
+// сначала SOCKS5 method-selection, затем HTTP CONNECT. Открытый порт с
+// незнакомым протоколом прокси НЕ считается (чтобы не путать чужие сервисы).
 func classifyListener(port int) (string, bool) {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
@@ -89,10 +96,21 @@ func classifyListener(port int) (string, bool) {
 		return "", false
 	}
 	defer c.Close()
-	c.SetDeadline(time.Now().Add(500 * time.Millisecond))
-	fmt.Fprintf(c, "OPTIONS / HTTP/1.0\r\n\r\n")
-	head := make([]byte, 5)
-	if _, err := io.ReadFull(c, head); err == nil && string(head) == "HTTP/" {
+	// HTTP-прокси опознаём по CONNECT: настоящий прокси отвечает 2xx (туннель
+	// готов) или 407 (просит авторизацию). Раньше хватало любого "HTTP/" в
+	// ответе на OPTIONS — и прокси объявлялся каждый локальный dev-сервер,
+	// чей порт совпал со списком proxy_ports.
+	c.SetDeadline(time.Now().Add(1200 * time.Millisecond)) // прокси нужно время реально установить туннель
+	fmt.Fprintf(c, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", connectProbe, connectProbe)
+	head := make([]byte, 12) // "HTTP/1.x NNN"
+	if _, err := io.ReadFull(c, head); err != nil || !strings.HasPrefix(string(head), "HTTP/") {
+		return "", false
+	}
+	code, err := strconv.Atoi(string(head[9:12]))
+	if err != nil {
+		return "", false
+	}
+	if code/100 == 2 || code == 407 {
 		return "http", true
 	}
 	return "", false

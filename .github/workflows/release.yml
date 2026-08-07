@@ -4,23 +4,30 @@ on:
   push:
     tags: ["v*"]
 
+# По умолчанию токен только читает; право писать (создавать релиз)
+# выдаётся точечно джобе release ниже.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
     runs-on: windows-latest
+    permissions:
+      contents: write # создание релиза и загрузка ассетов
     steps:
       - uses: actions/checkout@v4
 
+      # Версия Go берётся из go.mod, как и в CI: одна правка при обновлении.
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: go.mod
           cache: true
 
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
       # go:embed all:frontend/dist требует, чтобы каталог существовал уже
       # на этапе компиляции тестов, а в чистом клоне его нет: dist не хранится
@@ -28,6 +35,9 @@ jobs:
       - name: Build frontend
         working-directory: frontend
         run: npm ci && npm run build
+
+      - name: Vet
+        run: go vet ./...
 
       - name: Test
         run: go test ./...
@@ -38,22 +48,42 @@ jobs:
       # Без -s: этот флаг пропускает сборку фронтенда, а в чистом клоне
       # frontend/dist пуст — go:embed вшил бы пустоту, и релизный exe
       # открывал бы пустое окно.
+      # Имя тега — через env, а не инлайн-подстановкой ${{ }} в скрипт:
+      # подстановка выполняется до запуска PowerShell, и хитрое имя тега
+      # могло бы стать частью команды.
       - name: Build x64
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
-          wails build -platform windows/amd64 -nsis=false -ldflags "-X main.version=${{ github.ref_name }}"
+          wails build -platform windows/amd64 -nsis=false -ldflags "-X main.version=$env:VERSION"
           Move-Item build/bin/netcheck.exe build/bin/netcheck-windows-x64.exe
 
       # ARM64 — ноутбуки на Snapdragon. Код тот же; эмуляция x64 там работает,
       # но нативная сборка не греет батарею зря.
       - name: Build ARM64
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
-          wails build -platform windows/arm64 -nsis=false -ldflags "-X main.version=${{ github.ref_name }}"
+          wails build -platform windows/arm64 -nsis=false -ldflags "-X main.version=$env:VERSION"
           Move-Item build/bin/netcheck.exe build/bin/netcheck-windows-arm64.exe
 
+      # Контрольные суммы в формате sha256sum: бинарники не подписаны платным
+      # сертификатом, и сверка суммы — единственный способ убедиться, что exe
+      # не подменён по дороге. Файл кладётся в релиз рядом с бинарниками.
+      - name: Checksums
+        run: |
+          Get-FileHash build/bin/netcheck-windows-x64.exe, build/bin/netcheck-windows-arm64.exe -Algorithm SHA256 |
+            ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), (Split-Path $_.Path -Leaf) } |
+            Out-File build/bin/SHA256SUMS.txt -Encoding ascii
+          Get-Content build/bin/SHA256SUMS.txt
+
+      # Сторонний экшен запинен по SHA коммита (тег v2 = v2.6.2), чтобы
+      # подмена тега в чужом репозитории не подменила код у нас.
       - name: Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: |
             build/bin/netcheck-windows-x64.exe
             build/bin/netcheck-windows-arm64.exe
+            build/bin/SHA256SUMS.txt
           generate_release_notes: true

@@ -9,7 +9,7 @@
 // DOM-слоем поверх: так у них остаются подсказки и нормальный текст.
 
 import {geoOrthographic, geoEquirectangular, geoPath, geoGraticule10,
-  geoCentroid, geoInterpolate, geoBounds} from 'd3-geo';
+  geoInterpolate} from 'd3-geo';
 import {feature} from 'topojson-client';
 import landTopo from './data/land-110m.json';
 import countriesTopo from './data/countries-110m.json';
@@ -29,84 +29,92 @@ const BY_CODE = (() => {
   for (const [alpha2, numeric] of Object.entries(isoNumeric)) {
     const f = byId.get(String(numeric));
     if (!f) continue;
-    // radiusKm — насколько далеко от центра страны может лежать её роутер.
-    // Для Нидерландов это полторы сотни километров, для России — тысячи,
-    // и без этой поправки любая проверка расстояния от центроида врала бы
-    // ровно на размер страны.
-    const [[w, s], [e, n]] = geoBounds(f);
-    const half = angularDistance([w, s], [e, n]) * Math.PI / 180 * 6371 / 2;
-    out.set(alpha2, {feature: f, at: geoCentroid(f), radiusKm: half});
+    out.set(alpha2, f);
   }
   return out;
 })();
 
-const placeOf = code => (code && BY_CODE.get(code)) || null;
+// Контур страны нужен ровно для одного: подсветить заливкой ту, в которой
+// оборвался путь. Центр страны не нужен вовсе — точки шагов ставит бэкенд
+// по имени роутера или по узлу связи, а центроид России лежит в Сибири.
+const placeOf = code => {
+  const f = code && BY_CODE.get(code);
+  return f ? {feature: f} : null;
+};
+
+// SEVERITY — исходы от безобидного к худшему. Когда в одну точку приходят
+// разные маршруты, значок берётся по худшему из них: «сюда доходит» рядом
+// с «здесь обрывается» — это не два равноправных факта, а один повод
+// посмотреть внимательнее.
+const SEVERITY = ['ok', 'dim', 'pop', 'blocked', 'break'];
 
 const EARTH_KM = 6371;
 const kmBetween = (a, b) => angularDistance(a, b) * Math.PI / 180 * EARTH_KM;
 
-// reachableKm — насколько далеко физически может стоять машина, ответившая
-// за rtt мс. Тот же расчёт, что в geo.ReachableKm на бэкенде: свет в волокне
-// идёт около 200 км/мс, ответ проходит путь дважды.
-const reachableKm = rtt => (rtt > 0 ? rtt / 2 * 200 : 0);
-
 // waypoints — во что превращается маршрут на карте.
 //
-// Точка шага берётся из трёх источников по убыванию достоверности:
+// Рисуются только места, которые можно назвать: город из имени роутера
+// или узел связи страны, переживший проверку временем. Оба ставит бэкенд.
+// Центроида страны здесь больше нет, и это принципиально: у России он
+// в Сибири, у США — в Монтане, и шаг, размещённый туда, был бы не «грубо,
+// но лучше, чем ничего», а уверенным враньём на четыре тысячи километров.
+// Шаг, который разместить нечем, точки не даёт — луч просто идёт мимо него.
 //
-//   1. Координаты города из имени роутера (n.at) — их ставит бэкенд, разобрав
-//      обратную DNS-запись. Это единственный источник, который знает, где
-//      железо стоит физически.
-//   2. Центроид страны из геобазы — грубо, но лучше, чем ничего.
-//   3. Ничего: шаг не рисуется.
-//
-// Шаги, для которых бэкенд доказал невозможность (n.implausible), выброшены
-// им же. Здесь остаётся проверить лишь те, что размещены по стране: центроид
-// отстоит от настоящего роутера на полстраны, поэтому к бюджету добавляется
-// радиус страны — иначе Германия с 35 мс отбраковывалась бы у пользователя
-// в Москве только потому, что центроид России лежит в Сибири.
+// Шаги, у которых бэкенд доказал невозможность (n.implausible) или поймал
+// развилку пути (n.ambiguous — на повторный вопрос ответил другой роутер),
+// выброшены им же: одной точкой они не описываются.
 function waypoints(route) {
   const out = [];
   const end = route.break;
-  const anchor = route.anchor ? [route.anchor.lon, route.anchor.lat] : null;
+
+  // Луч начинается там, где сидит пользователь. Это единственная точка,
+  // которую мы знаем точно, и без неё маршрут, у которого первые шаги
+  // разместить не удалось, начинался бы из ниоткуда — а чаще не рисовался
+  // вовсе: собственный роутер провайдера в четырёх миллисекундах от нас
+  // размещению не поддаётся, и без этой точки половина лучей исчезала.
+  if (route.anchor) {
+    out.push({code: ' you', at: [route.anchor.lon, route.anchor.lat],
+      feature: null, node: null, exact: true});
+  }
 
   for (const n of route.nodes || []) {
-    if (n.private || n.implausible) continue;
+    if (n.private || n.implausible || n.ambiguous || !n.at) continue;
     // Ответ пришёл слишком быстро, чтобы «далёкая» страна была правдой:
     // отвечает ближайшая точка присутствия, а не сервер там, где адрес
     // числится. Ставить отметку в той стране нельзя.
     if (route.farCountry && end && n.n === end.n) continue;
 
-    let at = null, code = n.country, feature = null, exact = false;
-    if (n.at) {
-      at = [n.at.lon, n.at.lat];
-      exact = true;
-      code = n.city || n.country;
-    } else if (n.country) {
-      const pl = placeOf(n.country);
-      if (!pl) continue;
-      at = pl.at;
-      feature = pl.feature;
-      if (anchor && n.rttMs > 0 &&
-          kmBetween(anchor, at) - pl.radiusKm > reachableKm(n.rttMs)) continue;
-    }
-    if (!at) continue;
-    if (!feature && n.country) feature = (placeOf(n.country) || {}).feature || null;
+    const at = [n.at.lon, n.at.lat];
+    // exact — точка из имени роутера. Точка по стране (n.guessed) остаётся
+    // догадкой, и правило «возврат в ту же страну — ошибка базы, а не крюк»
+    // должно работать для неё, как работало до появления узлов связи.
+    const exact = !n.guessed;
+    const code = n.city || n.country;
+    const feature = (placeOf(n.country) || {}).feature || null;
 
     const prev = out[out.length - 1];
     // Соседние шаги в одном месте — одна точка. Десять роутеров одного
     // Франкфурта не десять отметок, а один Франкфурт.
     if (prev && (prev.code === code || kmBetween(prev.at, at) < 120)) {
       prev.node = n;
+      // Точка «ты здесь» приходит без страны — она поглощает первый шаг,
+      // и контур страны надо забрать у него, иначе обрыв нечем подсветить.
+      if (!prev.feature) prev.feature = feature;
+      if (prev.code === ' you') prev.code = code;
       continue;
     }
     // Возврат туда, где уже были, схлопывается только для грубых, страновых
     // точек: «Германия → Британия → Германия» у Telia — это ошибка базы,
     // а не крюк. Для точек, установленных по имени роутера, возврат может
-    // быть настоящим, и выбрасывать его нельзя.
+    // быть настоящим, и выбрасывать его нельзя. Срезать хвост можно тоже
+    // только без exact-точек в нём: между двумя вхождениями страны мог
+    // лежать настоящий город из имени роутера, и жертвовать знанием ради
+    // починки догадки нельзя — тогда это настоящий крюк, а не ошибка базы.
     if (!exact) {
       const seen = out.findIndex(w => !w.exact && w.code === code);
-      if (seen >= 0) { out.length = seen + 1; out[seen].node = n; continue; }
+      if (seen >= 0 && !out.slice(seen + 1).some(w => w.exact)) {
+        out.length = seen + 1; out[seen].node = n; continue;
+      }
     }
     out.push({code, at, feature, node: n, exact});
   }
@@ -119,8 +127,18 @@ function arcPoints(proj, from, to, steps = 48) {
   const mid = geoInterpolate(from, to);
   const runs = [];
   let run = [];
+  let prevLon = null;
   for (let i = 0; i <= steps; i++) {
-    const p = proj(steps ? mid(i / steps) : from);
+    const ll = steps ? mid(i / steps) : from;
+    // Кратчайшая дуга из России в США идёт через полюс и пересекает 180-й
+    // меридиан. На плоской карте долгота там прыгает с +179 на -179, и линия
+    // рисовалась полосой через весь экран — от Аляски до Камчатки.
+    if (prevLon !== null && Math.abs(ll[0] - prevLon) > 180) {
+      if (run.length > 1) runs.push(run);
+      run = [];
+    }
+    prevLon = ll[0];
+    const p = proj(ll);
     // На глобусе проекция отсекает обратную сторону — там линия рвётся,
     // и склеивать её через край шара нельзя.
     if (!p || !isFinite(p[0]) || !isFinite(p[1])) {
@@ -182,6 +200,10 @@ export class WorldMap {
     this.drag = null;
     this.raf = null;
     this.onSpinChange = null;
+    this._wps = new Map();      // маршрут → его точки, считается в setData
+    this._userTouched = false;  // юзер взял карту в руки — автофокус молчит
+    this._focusRaf = null;
+    this._focusing = false;
 
     // Глобус можно взять и покрутить в любую сторону.
     canvas.addEventListener('pointerdown', e => {
@@ -190,6 +212,9 @@ export class WorldMap {
     });
     canvas.addEventListener('pointermove', e => {
       if (!this.drag) return;
+      // Пользователь повёл карту сам — с этого момента автофокус не вправе
+      // её отбирать: ручное управление уважается, как и раньше.
+      this._userTouched = true;
       const dx = e.clientX - this.drag.x, dy = e.clientY - this.drag.y;
       if (this.style === 'globe') {
         // глобус крутим в любую сторону; за полюс не переваливаем,
@@ -213,6 +238,7 @@ export class WorldMap {
     // Колесо приближает и отдаляет — на любом виде карты.
     canvas.addEventListener('wheel', e => {
       e.preventDefault();
+      this._userTouched = true; // зум — тоже ручное управление
       const k = Math.exp(-e.deltaY * 0.0015);
       this.zoom = Math.max(1, Math.min(12, this.zoom * k));
       if (this.zoom === 1) this.offset = [0, 0]; // вернулись к исходному виду
@@ -224,7 +250,10 @@ export class WorldMap {
       this.ro = new ResizeObserver(() => this.render());
       this.ro.observe(canvas.parentElement || canvas);
     }
-    window.addEventListener('resize', () => this.render());
+    // Обработчик хранится в поле: destroy() обязан его снять, иначе каждая
+    // пересозданная карта оставляла бы в window слушателя-сироту.
+    this._onResize = () => this.render();
+    window.addEventListener('resize', this._onResize);
   }
 
   setStyle(style) {
@@ -243,13 +272,120 @@ export class WorldMap {
 
   setData(data) {
     this.data = data || {routes: []};
+    // waypoints зависят только от данных: считаем их один раз здесь, а не
+    // трижды на каждый кадр вращения (заливка обрыва, лучи, оверлей).
+    this._wps = new Map();
+    for (const r of this.data.routes || []) this._wps.set(r, waypoints(r));
+    this.focusRoutes();
     this.render();
+  }
+
+  // wpsOf — мемоизированные точки маршрута. Незнакомому маршруту (данные
+  // пришли мимо setData) отвечает честным пересчётом, а не пустотой.
+  wpsOf(r) {
+    let w = this._wps.get(r);
+    if (!w) { w = waypoints(r); this._wps.set(r, w); }
+    return w;
+  }
+
+  // focusRoutes наводит камеру на маршруты: пользователь и его лучи — в центре
+  // внимания вместо стартового вида на Европу. Ручное управление сильнее:
+  // карту, взятую в руки, автофокус не дёргает.
+  focusRoutes() {
+    if (this._userTouched) return;
+    const pts = [];
+    for (const wps of this._wps.values()) {
+      if (wps.length < 2) continue; // одинокое «ты здесь» камеру не ведёт
+      for (const w of wps) pts.push(w.at);
+    }
+    if (!pts.length) return;
+
+    // Центр — среднее единичных векторов. У набора долгот по обе стороны
+    // 180-го меридиана «середины» в арифметическом смысле нет, а у точек
+    // на сфере она есть всегда.
+    let x = 0, y = 0, z = 0;
+    for (const [lon, lat] of pts) {
+      const la = lat * Math.PI / 180, lo = lon * Math.PI / 180;
+      x += Math.cos(la) * Math.cos(lo);
+      y += Math.cos(la) * Math.sin(lo);
+      z += Math.sin(la);
+    }
+    const len = Math.hypot(x, y, z);
+    if (len < 1e-9) return; // точки равномерно по всей сфере — наводиться некуда
+    const cLon = Math.atan2(y, x) * 180 / Math.PI;
+    const cLat = Math.asin(z / len) * 180 / Math.PI;
+
+    if (this.style === 'globe') {
+      this._animateRotation([-cLon, Math.max(-85, Math.min(85, -cLat))]);
+    } else {
+      this._animateOffset([cLon, cLat]);
+    }
+  }
+
+  // Плавный доворот глобуса к цели. Автовращение на время доворота молчит
+  // (см. loop) и продолжается с новой точки: фокус подменяет стартовый вид,
+  // а не пожелание пользователя.
+  _animateRotation(to) {
+    const from = [...this.rotation];
+    let dLon = to[0] - from[0];
+    dLon = ((dLon % 360) + 540) % 360 - 180; // короткой дугой, а не вокруг света
+    const dLat = to[1] - from[1];
+    const start = performance.now(), dur = 800;
+    cancelAnimationFrame(this._focusRaf);
+    this._focusing = true;
+    const step = now => {
+      const t = Math.min(1, (now - start) / dur);
+      const e = t * (2 - t); // easeOutQuad: быстро стартует, мягко доезжает
+      this.rotation = [from[0] + dLon * e, from[1] + dLat * e];
+      this.render();
+      if (t < 1 && !this._userTouched) {
+        this._focusRaf = requestAnimationFrame(step);
+      } else {
+        this._focusing = false;
+      }
+    };
+    this._focusRaf = requestAnimationFrame(step);
+  }
+
+  // Центрирование плоской карты: offset подводится так, чтобы центр маршрутов
+  // встал в середину холста. При zoom = 1 карта видна целиком и projection()
+  // всё равно зажимает сдвиг в ноль — фокусировать нечего.
+  _animateOffset(center) {
+    if (this.zoom === 1) return;
+    const box = this.canvas.parentElement || this.canvas;
+    const w = box.clientWidth, h = box.clientHeight;
+    if (!w || !h) return;
+    const pad = 10;
+    const base = geoEquirectangular()
+      .fitExtent([[pad, pad], [w - pad, h - pad]], {type: 'Sphere'});
+    const p = base(center);
+    if (!p) return;
+    // экран = центр + zoom·(базовая точка − центр) + offset, поэтому чтобы
+    // точка попала в центр холста: offset = −zoom·(базовая точка − центр).
+    const to = [-(p[0] - w / 2) * this.zoom, -(p[1] - h / 2) * this.zoom];
+    const from = [...this.offset];
+    const start = performance.now(), dur = 800;
+    cancelAnimationFrame(this._focusRaf);
+    this._focusing = true;
+    const step = now => {
+      const t = Math.min(1, (now - start) / dur);
+      const e = t * (2 - t);
+      this.offset = [from[0] + (to[0] - from[0]) * e, from[1] + (to[1] - from[1]) * e];
+      this.render(); // projection() сам удержит сдвиг в допустимых границах
+      if (t < 1 && !this._userTouched) {
+        this._focusRaf = requestAnimationFrame(step);
+      } else {
+        this._focusing = false;
+      }
+    };
+    this._focusRaf = requestAnimationFrame(step);
   }
 
   loop() {
     cancelAnimationFrame(this.raf);
     const tick = () => {
-      if (this.style === 'globe' && this.autoSpin && !this.drag) {
+      // пока камера доезжает до маршрутов, автовращение не тянет её вбок
+      if (this.style === 'globe' && this.autoSpin && !this.drag && !this._focusing) {
         this.rotation[0] += 0.12;
         this.render();
       }
@@ -258,7 +394,14 @@ export class WorldMap {
     this.raf = requestAnimationFrame(tick);
   }
 
-  destroy() { cancelAnimationFrame(this.raf); }
+  destroy() {
+    cancelAnimationFrame(this.raf);
+    cancelAnimationFrame(this._focusRaf);
+    // Наблюдатели переживают свой canvas, если их не снять: карта,
+    // пересозданная при переключении вкладок, копила бы обработчиков.
+    if (this.ro) this.ro.disconnect();
+    window.removeEventListener('resize', this._onResize);
+  }
 
   projection(w, h) {
     // fitExtent вместо ручного масштаба: глобус гарантированно вписывается
@@ -379,7 +522,7 @@ export class WorldMap {
         // Живой сервис с недошедшей трассировкой — не обрыв, а фильтрация
         // ICMP по пути. Красить за это страну значило бы обвинять её зря.
         if (r.reached || r.opaque) continue;
-        const wps = waypoints(r);
+        const wps = this.wpsOf(r);
         const last = wps[wps.length - 1];
         if (last) broken.add(last.feature);
       }
@@ -392,7 +535,7 @@ export class WorldMap {
     }
 
     for (const r of routes) {
-      const wps = waypoints(r);
+      const wps = this.wpsOf(r);
       if (wps.length < 2) continue;
       ctx.lineWidth = 1.4;
       ctx.lineCap = 'round';
@@ -423,7 +566,24 @@ export class WorldMap {
   // Якоря и метки — DOM поверх холста: нужны подсказки и читаемый текст.
   renderOverlay(proj, w, h) {
     const ov = this.overlay;
-    ov.innerHTML = '';
+    // Узлы оверлея переиспользуются между кадрами: на глобусе этот код
+    // работает 60 раз в секунду, и innerHTML = '' с пересозданием десятков
+    // <div> на каждый кадр кормил сборщик мусора вместо вращения. Курсор
+    // идёт по уже существующим детям, лишние срезаются в самом конце.
+    let cursor = 0;
+    const take = cls => {
+      let el = ov.children[cursor];
+      if (!el) { el = document.createElement('div'); ov.appendChild(el); }
+      cursor++;
+      // В прошлом кадре узел мог играть другую роль — чистим всё, что
+      // ставится не всегда: текст, подсказку и геометрию выносок.
+      el.className = cls;
+      if (el.textContent) el.textContent = '';
+      if (el.title) el.title = '';
+      el.style.width = '';
+      el.style.transform = '';
+      return el;
+    };
     ov.style.width = w + 'px';
     ov.style.height = h + 'px';
 
@@ -433,10 +593,17 @@ export class WorldMap {
     const visible = (lon, lat) =>
       this.style !== 'globe' || angularDistance(center, [lon, lat]) < 89;
 
+    // При увеличении часть точек уезжает за край холста. Их отметки браузер
+    // просто не показывал, а подписи оставались — и висели поверх интерфейса
+    // рядом с картой, привязанные к невидимому. Точки за краем не рисуем вовсе.
+    const onCanvas = p => p && isFinite(p[0]) && isFinite(p[1]) &&
+      p[0] >= 0 && p[0] <= w && p[1] >= 0 && p[1] <= h;
+
+    // put больше не добавляет узел в DOM — этим занимается take: узел уже
+    // на месте, меняются только координаты.
     const put = (el, x, y) => {
       el.style.left = x + 'px';
       el.style.top = y + 'px';
-      ov.appendChild(el);
     };
 
     // Концы лучей группируются по стране и исходу: до одной и той же точки
@@ -445,9 +612,11 @@ export class WorldMap {
     const labels = this.data.labels || {};
     const ends = new Map();
     for (const r of this.data.routes || []) {
-      const wps = waypoints(r);
+      const wps = this.wpsOf(r);
+      // Одна точка — это только «ты здесь»: ни одного шага разместить
+      // не удалось, и говорить про такой маршрут на карте нечего.
+      if (wps.length < 2) continue;
       const last = wps[wps.length - 1];
-      if (!last) continue;
       // Порядок важен: «пакеты дошли, а сервис не работает» — это блокировка,
       // и назвать её «маршрут дошёл» значило бы противоречить отчёту,
       // где тот же сервис помечен недоступным.
@@ -455,89 +624,183 @@ export class WorldMap {
         : !r.reached ? 'break'
         : r.serviceOK === false ? 'blocked'
         : r.farCountry ? 'pop' : 'ok';
-      const key = last.code + '|' + kind;
+      // Одно место и один оператор — одна отметка. Разбивать её ещё и по
+      // исходу нельзя: у одного узла и доходящие маршруты, и оборвавшиеся,
+      // и тогда в один пиксель ложились три значка друг на друга, а рядом
+      // вставали две одинаковые подписи. Значок берётся по худшему исходу,
+      // остальное рассказывает подсказка.
+      const owner = last.node && last.node.org
+        ? `AS${last.node.asn} ${last.node.org}`
+        : (last.node && last.node.ip) || last.code;
+      const key = last.code + '|' + owner;
       let g = ends.get(key);
       if (!g) {
-        g = {at: last.at, code: last.code, kind, node: last.node, hosts: [], notes: new Set()};
+        g = {at: last.at, code: last.code, owner, kind, node: last.node,
+          hosts: [], notes: new Set(), kinds: new Set()};
         ends.set(key, g);
       }
+      if (SEVERITY.indexOf(kind) > SEVERITY.indexOf(g.kind)) g.kind = kind;
+      g.kinds.add(kind);
       g.hosts.push(r.host);
       if (r.note) g.notes.add(r.note);
     }
 
-    // К одной и той же стране приходят и оборвавшиеся маршруты, и дошедшие.
-    // Подписи у них ложатся в одну точку и перекрывают друг друга, поэтому
-    // каждую следующую сдвигаем вниз, пока место не освободится.
-    const taken = [];
-    const freeSpot = (x, y) => {
-      let shift = 0;
-      while (taken.some(t => Math.abs(t.x - x) < 120 && Math.abs(t.y - (y + shift)) < 12)) {
-        shift += 13;
-        if (shift > 130) break; // не уводить подпись за пределы разумного
+    // Подписи собираются списком и раскладываются одним заходом в самом конце.
+    //
+    // Раскладывать их по одной, сдвигая каждую следующую вниз, пока не
+    // освободится место, бесполезно: концы лучей сбиваются в Европу — десяток
+    // точек на сотню пикселей, — и столбец подписей уезжал в Индийский океан,
+    // где всё равно ложился сам на себя, упёршись в ограничитель сдвига.
+    // Вместо этого подпись, которой не хватило места у своей точки, выносится
+    // в столбец у ближнего края карты и соединяется с ней выноской. Это
+    // обычная картографическая выноска, и она читается.
+    const want = [];
+
+    // В один и тот же узел связи приходят разные операторы — до московского
+    // сходятся и Ростелеком, и Яндекс, и Cloudflare, — и значки ложились
+    // в один пиксель, где виден оставался последний. Разводим их короткой
+    // спиралью: несколько пикселей на карте мира ничего не искажают, зато
+    // видно, что точка тут не одна.
+    const used = [];
+    const spread = p => {
+      let x = p[0], y = p[1];
+      for (let k = 1; used.some(u => Math.hypot(u[0] - x, u[1] - y) < 9); k++) {
+        const r = 7 + k * 1.6;
+        x = p[0] + Math.cos(k * 1.9) * r;
+        y = p[1] + Math.sin(k * 1.9) * r;
       }
-      taken.push({x, y: y + shift});
-      return y + shift;
+      used.push([x, y]);
+      return [x, y];
     };
 
     for (const g of ends.values()) {
       if (!visible(g.at[0], g.at[1])) continue;
-      const p = proj(g.at);
-      if (!p || !isFinite(p[0])) continue;
+      const raw = proj(g.at);
+      if (!onCanvas(raw)) continue;
+      const p = spread(raw);
 
-      const owner = g.node && g.node.org
-        ? `AS${g.node.asn} ${g.node.org}`
-        : (g.node && g.node.ip) || g.code;
+      const owner = g.owner;
 
-      const mark = document.createElement('div');
-      mark.className = g.kind === 'break' ? 'mx'
+      const mark = take(g.kind === 'break' ? 'mx'
         : g.kind === 'pop' ? 'mpop'
         : g.kind === 'dim' ? 'mdim'
         : g.kind === 'blocked' ? 'mdot bad'
-        : 'mdot ok';
+        : 'mdot ok');
       mark.title = [
-        `${labels[g.kind] || g.kind}: ${owner}`,
+        `${[...g.kinds].map(k => labels[k] || k).join(' / ')}: ${owner}`,
         g.hosts.join(', '),
         ...g.notes,
       ].filter(Boolean).join('\n');
       put(mark, p[0], p[1]);
 
-      // у правого края подпись уходит влево, иначе её срезает границей окна
-      const left = p[0] > w * 0.78;
-      const lab = document.createElement('div');
-      lab.className = 'mlab' + (left ? ' left' : '') + (g.kind === 'break' ? ' bad' : '');
-      lab.textContent = g.hosts.length > 1 ? `${owner} · ${g.hosts.length}` : owner;
-      put(lab, p[0] + (left ? -9 : 9), freeSpot(p[0], p[1] - 7));
+      want.push({
+        p,
+        text: g.hosts.length > 1 ? `${owner} · ${g.hosts.length}` : owner,
+        cls: 'mlab' + (g.kind === 'break' ? ' bad' : ''),
+      });
     }
 
     const pin = (info, cls, label) => {
       if (!info || (!info.lat && !info.lon)) return null;
       if (!visible(info.lon, info.lat)) return null;
-      const p = proj([info.lon, info.lat]);
-      if (!p || !isFinite(p[0])) return null;
-      const el = document.createElement('div');
-      el.className = 'mpin ' + cls;
+      const raw = proj([info.lon, info.lat]);
+      if (!onCanvas(raw)) return null;
+      const p = spread(raw);
+      const el = take('mpin ' + cls);
       el.title = `${label}: ${info.city || ''} ${info.country || ''} ${info.ip || ''}`.trim();
       put(el, p[0], p[1]);
-      const lab = document.createElement('div');
-      lab.className = 'mlab pin';
-      lab.textContent = `${label}: ${info.city || info.country || info.ip || ''}`;
-      // Метки «ты здесь» и «выход VPN» разводятся тем же механизмом,
-      // что и подписи лучей: они ложатся в те же места на карте.
-      put(lab, p[0] + 10, freeSpot(p[0] + 10, p[1] + 9));
+      // «Ты здесь» и «выход VPN» встают в общую очередь: они ложатся ровно
+      // туда же, куда и подписи лучей, и разводить их отдельно нечестно.
+      want.push({p, text: `${label}: ${info.city || info.country || info.ip || ''}`,
+        cls: 'mlab pin', first: true});
       return p;
     };
 
     const a = pin(this.data.geoDirect, 'here', labels.here || 'you');
     const b = pin(this.data.geoProxy, 'vpn', labels.vpn || 'VPN');
+    this.layOutLabels(want, w, h, put, take);
     if (a && b) {
-      const line = document.createElement('div');
-      line.className = 'mline';
+      const line = take('mline');
       const dx = b[0] - a[0], dy = b[1] - a[1];
       line.style.left = a[0] + 'px';
       line.style.top = a[1] + 'px';
       line.style.width = Math.hypot(dx, dy) + 'px';
       line.style.transform = `rotate(${Math.atan2(dy, dx)}rad)`;
-      ov.appendChild(line);
+    }
+    // хвост от прошлого кадра: точек могло стать меньше
+    while (ov.children.length > cursor) ov.removeChild(ov.lastChild);
+  }
+
+  // layOutLabels раскладывает подписи так, чтобы каждую можно было прочесть
+  // и понять, к какой она точке.
+  //
+  // Сначала подпись пробуют поставить рядом с её точкой. Если там уже занято,
+  // она уходит в столбец у ближнего края карты, а к точке от неё тянется
+  // выноска. Столбец упакован сверху вниз в порядке высоты точек — так линии
+  // выносок не перепутываются между собой.
+  //
+  // Ширину меряем на глаз, по числу знаков: настоящий замер через offsetWidth
+  // заставляет браузер пересчитывать раскладку, а этот код на глобусе
+  // работает шестьдесят раз в секунду.
+  layOutLabels(items, w, h, put, take) {
+    // CH — ширина знака шрифта подписей: моноширинный, 9.5 px, около 5.7 px
+    // на знак. Берём чуть с запасом: недомер ширины означает, что две подписи
+    // «не пересекаются» по расчёту и ложатся друг на друга на экране.
+    const ROW = 14, CH = 5.8, PAD = 8;
+    const wide = t => t.length * CH + 4;
+    const boxes = [];
+    const fits = (x, y, bw) => !boxes.some(b =>
+      x < b.x + b.w && b.x < x + bw && Math.abs(b.y - y) < ROW - 2);
+
+    // «Ты здесь» и «выход VPN» ставятся первыми: это опора всей карты,
+    // и уводить их в столбец, пока рядом есть место, незачем.
+    const order = [...items.keys()].sort((i, j) =>
+      (items[j].first ? 1 : 0) - (items[i].first ? 1 : 0) || items[i].p[1] - items[j].p[1]);
+
+    const spill = [];
+    for (const i of order) {
+      const it = items[i];
+      const bw = wide(it.text);
+      // у правого края подпись уходит влево, иначе её срезает границей окна
+      const left = it.p[0] + bw + 12 > w - PAD;
+      const x = left ? it.p[0] - 9 - bw : it.p[0] + 9;
+      const y = it.p[1] - 7;
+      if (x >= PAD && fits(x, y, bw)) {
+        boxes.push({x, y, w: bw});
+        const el = take(it.cls + (left ? ' left' : ''));
+        el.textContent = it.text;
+        put(el, it.p[0] + (left ? -9 : 9), y);
+      } else {
+        spill.push(it);
+      }
+    }
+    if (!spill.length) return;
+
+    // Столбец: каждая подпись у того края, к которому её точка ближе.
+    for (const side of ['left', 'right']) {
+      const col = spill.filter(it => (it.p[0] < w / 2) === (side === 'left'))
+        .sort((a, b) => a.p[1] - b.p[1]);
+      let y = PAD;
+      for (const it of col) {
+        y = Math.min(Math.max(y, it.p[1] - 7), h - PAD - ROW);
+        const bw = wide(it.text);
+        const x = side === 'left' ? PAD : w - PAD - bw;
+        const el = take(it.cls);
+        el.textContent = it.text;
+        put(el, x, y);
+        // Выноска от точки к началу строки. Без неё столбец из семи строк —
+        // просто список, по которому не понять, что к чему относится.
+        const tip = side === 'left' ? x + bw + 3 : x - 3;
+        const dx = tip - it.p[0], dy = (y + 6) - it.p[1];
+        const len = Math.hypot(dx, dy);
+        if (len > 10) {
+          const l = take('mlead');
+          l.style.width = len + 'px';
+          l.style.transform = `rotate(${Math.atan2(dy, dx)}rad)`;
+          put(l, it.p[0], it.p[1]);
+        }
+        y += ROW;
+      }
     }
   }
 }

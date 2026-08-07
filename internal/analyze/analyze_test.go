@@ -156,6 +156,95 @@ func TestDiagnose(t *testing.T) {
 				SysOutcome: probe.OutTimeout, DoHOutcome: probe.OutTimeout},
 			want: CauseDNSSilent,
 		},
+		{
+			// ГЛАВНАЯ ДЫРА: мёртвый VPN отвечает кодом 0, и «0 ≠ 403»
+			// превращало любой антибот-403 в «геоблок, доказано».
+			name: "403 при мёртвом контроле — не геоблок",
+			ev: Evidence{Host: "chatgpt.com", SysIPs: []string{"1.2.3.4"},
+				TCP: tcpOK, TLSReal: tlsOK,
+				HTTP:    probe.Result{Status: probe.StatusFail, Code: 403},
+				Control: &probe.Result{Status: probe.StatusFail, Code: 0, Outcome: probe.OutTimeout}},
+			want: CauseUnknown,
+		},
+		{
+			// Через другую страну — та же защита от роботов, просто кодом 503.
+			// Разные коды здесь не «другой ответ», а один и тот же challenge.
+			name: "403 против challenge через VPN — антибот, а не геоблок",
+			ev: Evidence{Host: "stackoverflow.com", SysIPs: []string{"1.2.3.4"},
+				TCP: tcpOK, TLSReal: tlsOK,
+				HTTP:    probe.Result{Status: probe.StatusFail, Code: 403},
+				Control: &probe.Result{Status: probe.StatusWarn, Code: 503, Challenge: true,
+					Body: "<title>Just a moment...</title>"}},
+			want: CauseAntibot,
+		},
+		{
+			// 429 — про частоту запросов с нашего адреса, страна ни при чём.
+			name: "429 прямо и 200 через VPN — не геоблок",
+			ev: Evidence{Host: "api.example.com", SysIPs: []string{"1.2.3.4"},
+				TCP: tcpOK, TLSReal: tlsOK,
+				HTTP:    probe.Result{Status: probe.StatusFail, Code: 429},
+				Control: &probe.Result{Status: probe.StatusOK, Code: 200}},
+			want: CauseAntibot,
+		},
+		{
+			// refused — ответ сети или сервера, а не вмешательство по пути:
+			// объявлять его «блокировкой по IP, доказано» нельзя.
+			name: "tcp всюду refused — не ip_block",
+			ev: Evidence{Host: "example.com", SysIPs: []string{"1.2.3.4"},
+				TCP: []probe.Result{{Status: probe.StatusFail, Outcome: probe.OutRefused}}},
+			want: CauseUnknown,
+		},
+		{
+			name: "tcp всюду unreachable — не ip_block",
+			ev: Evidence{Host: "example.com", SysIPs: []string{"1.2.3.4"},
+				TCP: []probe.Result{{Status: probe.StatusFail, Outcome: probe.OutUnreach}}},
+			want: CauseUnknown,
+		},
+		{
+			// Отмена прогона — факт о нас, а не о сети.
+			name: "отменённые пробы — не улика",
+			ev: Evidence{Host: "example.com", SysIPs: []string{"1.2.3.4"},
+				TCP: []probe.Result{{Status: probe.StatusFail, Outcome: probe.OutCanceled}}},
+			want: CauseUnknown,
+		},
+		{
+			// RST посреди тела — тот же почерк частичной фильтрации,
+			// что и молчание: заголовки пропустили, содержимое срезали.
+			name: "rst посреди тела — http_drop",
+			ev: Evidence{Host: "kaspi.kz", SysIPs: []string{"1.2.3.4"},
+				TCP: tcpOK, TLSReal: tlsOK,
+				HTTP:    probe.Result{Status: probe.StatusWarn, Code: 200, Outcome: probe.OutReset},
+				Control: &probe.Result{Status: probe.StatusOK, Code: 200}},
+			want: CauseHTTPDrop,
+		},
+		{
+			// «Just a moment» с кодом 503 — challenge, а не лежащий сервис.
+			name: "503 с подписью challenge — антибот, а не service_down",
+			ev: Evidence{Host: "sponsr.ru", SysIPs: []string{"1.2.3.4"},
+				TCP: tcpOK, TLSReal: tlsOK,
+				HTTP: probe.Result{Status: probe.StatusWarn, Code: 503,
+					Body: "<title>Just a moment...</title>", Challenge: true}},
+			want: CauseAntibot,
+		},
+		{
+			// Cf-Mitigated: block — это блок, а не challenge; без контроля
+			// сказать больше нечего.
+			name: "cf-mitigated block без контроля — не антибот",
+			ev: Evidence{Host: "example.com", SysIPs: []string{"1.2.3.4"},
+				TCP: tcpOK, TLSReal: tlsOK,
+				HTTP: probe.Result{Status: probe.StatusFail, Code: 403, CFMitigated: "block"}},
+			want: CauseUnknown,
+		},
+		{
+			// Симметрия к da14a06: без контрольного замера SSO неотличим
+			// от заглушки, и «заглушка» здесь была бы выдумкой.
+			name: "кросс-доменный редирект без контроля — не заглушка",
+			ev: Evidence{Host: "dzen.ru", SysIPs: []string{"1.2.3.4"},
+				TCP: tcpOK, TLSReal: tlsOK,
+				HTTP: probe.Result{Status: probe.StatusOK, Code: 302,
+					Location: "sso.passport.yandex.ru"}},
+			want: CauseUnknown,
+		},
 	}
 	for _, c := range cases {
 		if got := Diagnose(c.ev); got != c.want {

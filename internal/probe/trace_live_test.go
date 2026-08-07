@@ -24,7 +24,12 @@ func TestLiveTrace(t *testing.T) {
 			}
 			t.Logf("%s: %d шагов за %v", target, len(hops), time.Since(start).Round(time.Millisecond))
 			for _, h := range hops {
-				t.Logf("  %2d  %-16s %5d мс  %s %s", h.N, h.IP, h.RTTms, h.Status, h.Detail)
+				fork := ""
+				if h.Ambiguous {
+					fork = "  ← развилка"
+				}
+				t.Logf("  %2d  %-16s %5d мс  %-11s %-45s%s%s",
+					h.N, h.IP, h.RTTms, h.Status, h.Host, h.Detail, fork)
 			}
 
 			if len(hops) == 0 {

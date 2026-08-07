@@ -39,6 +39,9 @@ func TestClassifyErrByErrno(t *testing.T) {
 		{"имя не найдено", wsa(11001), OutDNSFail},
 
 		{"истёк наш бюджет", context.DeadlineExceeded, OutTimeout},
+		// Отмена — факт о нас, а не о сети: OutOther здесь портил бы
+		// вердикт, как будто проба честно кончилась неудачей.
+		{"прогон отменили", context.Canceled, OutCanceled},
 		{"конец потока", io.EOF, OutEOF},
 		{"нет ошибки", nil, OutOK},
 	}

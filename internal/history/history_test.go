@@ -1,7 +1,10 @@
 package history
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -138,5 +141,117 @@ func TestSummarize(t *testing.T) {
 	}
 	if e.Duration != rep.Duration {
 		t.Fatalf("duration mismatch: %v vs %v", e.Duration, rep.Duration)
+	}
+}
+
+// Delete убирает ровно запрошенную запись и не трогает соседние;
+// незнакомое или кривое время — не ошибка (удалять удалённое — нормально).
+func TestDeleteRemovesOnlyRequested(t *testing.T) {
+	t.Setenv("APPDATA", t.TempDir())
+
+	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		e := Entry{
+			At:      base.Add(time.Duration(i) * time.Minute),
+			Status:  probe.StatusOK,
+			Summary: fmt.Sprintf("run %d", i),
+		}
+		if err := Append(Record{Entry: e}, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	victim := base.Add(1 * time.Minute)
+	if err := Delete([]string{victim.Format(time.RFC3339Nano)}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("после удаления одной записи должно остаться 2, got %d", len(got))
+	}
+	for _, e := range got {
+		if e.Summary == "run 1" {
+			t.Errorf("удалённая запись осталась в истории: %+v", got)
+		}
+	}
+
+	// незнакомое время и мусор молча игнорируются, остальное не трогается
+	if err := Delete([]string{"2030-01-01T00:00:00Z", "не время"}); err != nil {
+		t.Fatalf("удаление несуществующего не должно быть ошибкой: %v", err)
+	}
+	got, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("удаление несуществующего съело записи: осталось %d", len(got))
+	}
+}
+
+// Clear на отсутствующем файле — не ошибка: стирать пустую историю
+// пользователю никто не запрещал. А на существующем — стирает целиком.
+func TestClearMissingAndExisting(t *testing.T) {
+	t.Setenv("APPDATA", t.TempDir())
+
+	if err := Clear(); err != nil {
+		t.Fatalf("Clear без файла не должен падать: %v", err)
+	}
+
+	e := Entry{At: time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC), Status: probe.StatusOK, Summary: "run"}
+	if err := Append(Record{Entry: e}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := Clear(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("после Clear история должна быть пуста, got %d", len(got))
+	}
+}
+
+// Повреждённая строка в runs.jsonl (обрыв записи, ручная правка) не должна
+// ронять всю историю: битое пропускается, целое читается.
+func TestLoadSkipsCorruptLine(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+
+	ncDir := filepath.Join(dir, "netcheck")
+	if err := os.MkdirAll(ncDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rec := func(min int, sum string) string {
+		raw, err := json.Marshal(Record{Entry: Entry{
+			At:      time.Date(2026, 8, 5, 12, min, 0, 0, time.UTC),
+			Status:  probe.StatusOK,
+			Summary: sum,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	content := rec(0, "первый") + "\n" +
+		"{битый json, оборванная запись\n" +
+		rec(1, "второй") + "\n"
+	if err := os.WriteFile(filepath.Join(ncDir, "runs.jsonl"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("битая строка не должна ронять чтение: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 целых записи, got %d", len(got))
+	}
+	if got[0].Summary != "второй" || got[1].Summary != "первый" {
+		t.Errorf("целые записи потерялись или перепутались: %+v", got)
 	}
 }

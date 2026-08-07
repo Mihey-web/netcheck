@@ -9,7 +9,6 @@ package analyze
 
 import (
 	"net"
-	"strings"
 
 	"github.com/mihey/netcheck/internal/probe"
 )
@@ -96,7 +95,11 @@ func Explain(ev Evidence) Verdict {
 	}
 
 	// ── 2. IP ────────────────────────────────────────────────────
-	if len(ev.TCP) > 0 && !anyOK(ev.TCP) {
+	// Диагноз по классу отказа, а не по факту неудачи: «блокировка по IP»
+	// доказывается вмешательством по пути (молчание, RST, вброс).
+	// Refused и unreachable — ответ самой сети или сервера, и отмена
+	// прогона — вообще не факт о сети; такие отказы падают в общие правила.
+	if len(ev.TCP) > 0 && !anyOK(ev.TCP) && anyInterfered(ev.TCP) {
 		return Verdict{CauseIPBlock, ConfHigh}
 	}
 
@@ -119,17 +122,22 @@ func Explain(ev Evidence) Verdict {
 	}
 
 	// ── 5–8. что сказал сам сервер ───────────────────────────────
+	// Challenge проверяется раньше пятисоток: «Just a moment» приходит
+	// и с кодом 503, и записывать его в «сервис лежит» — ложный вердикт.
 	switch {
 	case ev.HTTP.Code == 451:
 		return Verdict{CauseGeoBlock, ConfHigh}
-	case isAntibot(ev.HTTP):
+	case probe.IsChallenge(ev.HTTP):
 		return Verdict{CauseAntibot, ConfHigh}
 	case ev.HTTP.Code >= 500:
 		return Verdict{CauseDown, ConfHigh}
 	}
 
 	// ── 9. TLS живой, HTTP молчит ────────────────────────────────
-	if ev.TLSReal.Status == probe.StatusOK && ev.HTTP.Outcome == probe.OutTimeout {
+	// RST посреди тела — тот же почерк частичной фильтрации, что и молчание:
+	// заголовки пропустили, содержимое срезали.
+	if ev.TLSReal.Status == probe.StatusOK &&
+		(ev.HTTP.Outcome == probe.OutTimeout || ev.HTTP.Outcome == probe.OutReset) {
 		if ev.Control != nil && ev.Control.Status == probe.StatusOK {
 			return Verdict{CauseHTTPDrop, ConfMedium}
 		}
@@ -139,11 +147,20 @@ func Explain(ev Evidence) Verdict {
 	// ── 7/11. 403 разбирается только контрольным замером ─────────
 	// Тот же 403 через другую страну — это антибот; другой ответ — геоблок.
 	if ev.HTTP.Code == 403 || ev.HTTP.Code == 429 {
-		if ev.Control != nil {
-			if ev.Control.Code == ev.HTTP.Code {
+		// Сравнивать можно только с состоявшимся замером: мёртвый VPN
+		// отвечает кодом 0, и «0 ≠ 403» превращало любой антибот-403
+		// в «геоблок, доказано». Отсутствие данных — не улика.
+		if ev.Control != nil && ev.Control.Code != 0 {
+			// Challenge через другую страну — та же защита от роботов,
+			// даже если код другой (403 дома против 503 «Just a moment»).
+			if ev.Control.Code == ev.HTTP.Code || probe.IsChallenge(*ev.Control) {
 				return Verdict{CauseAntibot, ConfMedium}
 			}
-			return Verdict{CauseGeoBlock, ConfHigh}
+			if ev.HTTP.Code == 403 {
+				return Verdict{CauseGeoBlock, ConfHigh}
+			}
+			// 429 — про частоту запросов с нашего адреса, а не про страну.
+			return Verdict{CauseAntibot, ConfLow}
 		}
 		return Verdict{CauseUnknown, ConfLow}
 	}
@@ -152,13 +169,11 @@ func Explain(ev Evidence) Verdict {
 	// Редирект на чужой домен сам по себе нормален (SSO, единый вход, смена
 	// бренда: dzen.ru→sso.passport.yandex.ru, mail.ru→login.vk.ru,
 	// twitter.com→x.com). Заглушка — когда через контрольный выход того же
-	// редиректа нет.
+	// редиректа нет; без контрольного замера SSO от заглушки не отличить,
+	// и говорить «заглушка» на этом основании — выдумка.
 	if ev.HTTP.Location != "" && !probe.SameSite(ev.Host, ev.HTTP.Location) {
 		if ev.Control != nil && ev.Control.Location != ev.HTTP.Location {
 			return Verdict{CauseGeoBlock, ConfMedium}
-		}
-		if ev.Control == nil {
-			return Verdict{CauseStub, ConfLow}
 		}
 	}
 
@@ -204,19 +219,14 @@ func serverAnswered(rs []probe.Result) bool {
 	return false
 }
 
-// isAntibot — 403/429 с подписью защиты от роботов. Через VPN такой ответ
-// не меняется, и лечится он не сменой страны, а браузером.
-func isAntibot(r probe.Result) bool {
-	if r.Code != 403 && r.Code != 429 {
-		return false
+// anyInterfered — хоть один адрес отказал классом «вмешательство по пути».
+func anyInterfered(rs []probe.Result) bool {
+	for _, r := range rs {
+		if interfered(r) {
+			return true
+		}
 	}
-	if r.CFMitigated != "" {
-		return true
-	}
-	b := strings.ToLower(r.Body)
-	return strings.Contains(b, "just a moment") ||
-		strings.Contains(b, "cf-challenge") ||
-		strings.Contains(b, "captcha")
+	return false
 }
 
 func anyOK(rs []probe.Result) bool {

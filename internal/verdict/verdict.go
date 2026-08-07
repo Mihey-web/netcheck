@@ -24,7 +24,12 @@ type ServiceVerdict struct {
 	// ProxyTried — замер через VPN вообще делался. Без этого флага
 	// «не работает даже через VPN» говорилось и о тех сервисах,
 	// которые через VPN ни разу не спрашивали.
-	ProxyTried bool          `json:"proxyTried,omitempty"`
+	ProxyTried bool `json:"proxyTried,omitempty"`
+	// Challenged — вместо страницы пришла проверка «я не робот». Сервер
+	// ответил, путь чист, в браузере сайт откроется — но программой он
+	// не проверен, и выдавать это за «работает» так же нечестно,
+	// как за «не работает».
+	Challenged bool          `json:"challenged,omitempty"`
 	Cause      analyze.Cause `json:"cause"`
 }
 
@@ -47,6 +52,16 @@ type Verdict struct {
 	Lines    []string      `json:"lines"`
 	Warnings []string      `json:"warnings"`
 	Chain    []LayerStatus `json:"chain"`
+}
+
+// proxyIsInnocent — диагноз, который сам объясняет неудачу через VPN,
+// и валить её на VPN-сервер после этого нельзя. Геоблок здесь тоже:
+// «сайт отказал по стране» уже говорит, что выход VPN оказался
+// в неподходящей стране, — дописывать «проблема на стороне VPN-сервера»
+// значит спорить с соседней строкой.
+func proxyIsInnocent(c analyze.Cause) bool {
+	return c == analyze.CauseAntibot || c == analyze.CauseDown ||
+		c == analyze.CauseGeoBlock
 }
 
 // prettyNames — человеко-имена известных сервисов; остальные — как есть.
@@ -166,9 +181,24 @@ func Build(l i18n.Lang, in Input) Verdict {
 
 	// блокируемые сервисы: группировка по причине
 	groups := map[analyze.Cause][]string{}
-	var proxyFails []string
+	var proxyFails, challenged []string
+	// Сколько из недоступных напрямую открывается через VPN. Раньше здесь
+	// стоял один флаг «через VPN доступно всё», и трёх сервисов, которые
+	// не открываются нигде, хватало, чтобы промолчать про остальные двадцать.
+	// Человек читал список блокировок без единого слова о том, что через
+	// его же VPN почти всё это работает.
+	var blockedTotal, blockedViaProxy int
 	viaProxyAllOK := true
 	for _, s := range in.Services {
+		// Проверка «я не робот» — единственный исход, о котором честный ответ
+		// звучит «не знаю». Сервер ответил, путь до него чист, в браузере сайт
+		// откроется, а наш клиент капчу не решает по устройству. Молчать про
+		// это нельзя: пользователь увидел бы сервис в рабочих и не понял бы,
+		// почему он там, а объявить его сломанным — прямое враньё.
+		if s.Challenged {
+			challenged = append(challenged, pretty(s.Host))
+			continue
+		}
 		if s.DirectOK {
 			continue
 		}
@@ -177,13 +207,23 @@ func Build(l i18n.Lang, in Input) Verdict {
 			continue
 		}
 		groups[s.Cause] = append(groups[s.Cause], pretty(s.Host))
+		blockedTotal++
+		if s.ProxyOK {
+			blockedViaProxy++
+		}
 		// механизм блокировки — это про сервис, а «VPN не помог» — про VPN;
 		// одно не должно вытеснять другое из вердикта
 		if !s.ProxyOK {
 			viaProxyAllOK = false
 			// Обвинять VPN-сервер можно только по итогу замера через него.
 			// Раньше сюда попадали и сервисы, которые через VPN не спрашивали.
-			if s.ProxyTried {
+			//
+			// И только если диагноз сам уже не объяснил, почему через VPN тоже
+			// не вышло. Антибот ставится ровно по признаку «через другую страну
+			// ответ тот же», а «сервис лежит» — по его собственной пятисотке;
+			// добавлять к ним «похоже, проблема на стороне VPN-сервера» значит
+			// спорить с собой же двумя строками ниже.
+			if s.ProxyTried && !proxyIsInnocent(s.Cause) {
 				proxyFails = append(proxyFails, pretty(s.Host))
 			}
 		}
@@ -209,15 +249,23 @@ func Build(l i18n.Lang, in Input) Verdict {
 	}
 	if len(parts) > 0 {
 		line := strings.Join(parts, "; ")
-		if viaProxyAllOK && hasActiveProxy(in.Env) {
-			line += " " + i18n.T(l, "svc.via_proxy_ok")
-		} else {
+		switch {
+		case !hasActiveProxy(in.Env) || blockedViaProxy == 0:
 			line += "."
+		case viaProxyAllOK:
+			line += " " + i18n.T(l, "svc.via_proxy_ok")
+		default:
+			// Часть открывается, часть нет. Голое «не всё» здесь бесполезно:
+			// счёт говорит человеку ровно то, что он хочет знать.
+			line += " " + i18n.T(l, "svc.via_proxy_some", blockedViaProxy, blockedTotal)
 		}
 		v.Lines = append(v.Lines, line)
 	}
 	if len(proxyFails) > 0 {
 		v.Lines = append(v.Lines, i18n.T(l, "svc.proxy_fails", strings.Join(proxyFails, ", ")))
+	}
+	if len(challenged) > 0 {
+		v.Lines = append(v.Lines, i18n.T(l, "svc.challenge", strings.Join(challenged, ", ")))
 	}
 
 	v.Warnings = append(v.Warnings, envWarnings(l, in.Env)...)

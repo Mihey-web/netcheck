@@ -61,14 +61,17 @@ func ResolveUDP(ctx context.Context, host, server string) Result {
 	r := Result{Target: host, Method: "DNS·UDP", Path: PathDirect}
 	query, id, err := buildQuery(host)
 	if err != nil {
-		r.Status, r.Detail = StatusFail, err.Error()
+		r.Status, r.Detail, r.Outcome = StatusFail, err.Error(), OutOther
 		return r
 	}
 	var d net.Dialer
+	// Сетевые ошибки обязаны получать класс: с пустым Outcome «резолвер
+	// молчит» неотличимо от «имени нет», и analyze не мог сказать ни
+	// «сети нет», ни «UDP-DNS задушен».
 	conn, err := d.DialContext(ctx, "udp", server)
 	if err != nil {
 		r.Latency = time.Since(start)
-		r.Status, r.Detail = StatusFail, err.Error()
+		r.Status, r.Detail, r.Outcome = StatusFail, err.Error(), classifyErr(err)
 		return r
 	}
 	defer conn.Close()
@@ -77,7 +80,7 @@ func ResolveUDP(ctx context.Context, host, server string) Result {
 	}
 	if _, err := conn.Write(query); err != nil {
 		r.Latency = time.Since(start)
-		r.Status, r.Detail = StatusFail, err.Error()
+		r.Status, r.Detail, r.Outcome = StatusFail, err.Error(), classifyErr(err)
 		return r
 	}
 	// Читаем до дедлайна, а не первый попавшийся пакет. Классическая
@@ -122,12 +125,12 @@ func ResolveDoH(ctx context.Context, host, dohURL string) Result {
 	r := Result{Target: host, Method: "DNS·DoH", Path: PathDirect}
 	query, id, err := buildQuery(host)
 	if err != nil {
-		r.Status, r.Detail = StatusFail, err.Error()
+		r.Status, r.Detail, r.Outcome = StatusFail, err.Error(), OutOther
 		return r
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, dohURL, bytes.NewReader(query))
 	if err != nil {
-		r.Status, r.Detail = StatusFail, err.Error()
+		r.Status, r.Detail, r.Outcome = StatusFail, err.Error(), OutOther
 		return r
 	}
 	req.Header.Set("Content-Type", "application/dns-message")
@@ -135,12 +138,15 @@ func ResolveDoH(ctx context.Context, host, dohURL string) Result {
 	resp, err := dohClient.Do(req)
 	r.Latency = time.Since(start)
 	if err != nil {
-		r.Status, r.Detail = StatusFail, err.Error()
+		// «DoH задушен» диагностируется классом отказа; пустой Outcome
+		// делал эту ветку слепой — молчание сходило за «просто ошибка».
+		r.Status, r.Detail, r.Outcome = StatusFail, err.Error(), classifyErr(err)
 		return r
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		r.Status, r.Detail = StatusFail, fmt.Sprintf("http %d", resp.StatusCode)
+		// HTTP-ошибка — это ответ, а не молчание; но и не DNS-ответ.
+		r.Status, r.Detail, r.Outcome = StatusFail, fmt.Sprintf("http %d", resp.StatusCode), OutOther
 		return r
 	}
 	// Ответ обязан быть DNS-сообщением. Капитивный портал охотно отдаёт

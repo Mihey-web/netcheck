@@ -125,6 +125,70 @@ func init() {
 	addCodes(at("Tel Aviv", 32.08, 34.78), "tlv", "telaviv")
 	addCodes(at("Sao Paulo", -23.55, -46.63), "gru", "saopaulo")
 	addCodes(at("Johannesburg", -26.20, 28.05), "jnb", "johannesburg")
+	// Азия: без этих городов маршруты в полконтинента обрывались на карте
+	// раньше, чем в жизни, — стране просто некуда было поставить точку.
+	addCodes(at("Shanghai", 31.23, 121.47), "sha", "pvg", "shanghai")
+	addCodes(at("Beijing", 39.90, 116.41), "pek", "bjs", "beijing")
+	addCodes(at("Taipei", 25.03, 121.57), "tpe", "taipei")
+	addCodes(at("Bangkok", 13.76, 100.50), "bkk", "bangkok")
+	addCodes(at("Ho Chi Minh City", 10.82, 106.63), "sgn", "hochiminh", "saigon")
+	addCodes(at("Hanoi", 21.03, 105.85), "han", "hanoi")
+	addCodes(at("Jakarta", -6.19, 106.82), "cgk", "jkt", "jakarta")
+	addCodes(at("Kuala Lumpur", 3.14, 101.69), "kul", "kualalumpur")
+	addCodes(at("Manila", 14.60, 120.98), "mnl", "manila")
+	addCodes(at("Karachi", 24.86, 67.01), "khi", "karachi")
+	addCodes(at("Dhaka", 23.81, 90.41), "dac", "dhaka")
+	// Латинская Америка, Африка, Ближний Восток, Океания, Кавказ.
+	addCodes(at("Mexico City", 19.43, -99.13), "mex", "mexico")
+	addCodes(at("Buenos Aires", -34.60, -58.38), "eze", "buenosaires")
+	addCodes(at("Santiago", -33.45, -70.67), "scl", "santiago")
+	addCodes(at("Lima", -12.05, -77.04), "lim", "lima")
+	addCodes(at("Bogota", 4.71, -74.07), "bog", "bogota")
+	addCodes(at("Cairo", 30.04, 31.24), "cai", "cairo")
+	// «los» для Лагоса не берём: имена вида los-angeles режутся на куски,
+	// и Лос-Анджелес превращался бы в Нигерию.
+	addCodes(at("Lagos", 6.45, 3.39), "lagos")
+	addCodes(at("Riyadh", 24.71, 46.68), "ruh", "riyadh")
+	addCodes(at("Auckland", -36.85, 174.76), "akl", "auckland")
+	addCodes(at("Tbilisi", 41.72, 44.79), "tbs", "tbilisi")
+	addCodes(at("Yerevan", 40.18, 44.51), "evn", "yerevan")
+}
+
+// hubs — главный узел связи страны. Нужен там, где имя роутера ничего
+// не сказало и известна только страна.
+//
+// Геометрический центр страны для этого не годится: у России он в Сибири,
+// у США — в прериях Канзаса, и маршрут упирался в места, где магистралей
+// нет вовсе. Инфраструктура собрана в считаных точках обмена трафиком,
+// и «где-то в России» почти наверняка означает Москву. Это по-прежнему
+// догадка, но догадка на порядок ближе к правде, чем середина карты.
+var hubs = map[string]string{
+	"RU": "msk", "UA": "kiev", "BY": "minsk", "KZ": "ala",
+	"US": "iad", "CA": "yyz", "BR": "gru",
+	"DE": "fra", "NL": "ams", "GB": "lon", "FR": "par", "SE": "sto",
+	"FI": "hel", "NO": "osl", "DK": "cph", "PL": "waw", "CZ": "prg",
+	"AT": "vie", "CH": "zrh", "IT": "mil", "ES": "mad", "PT": "lis",
+	"IE": "dub", "BE": "bru", "RO": "otp", "BG": "sof", "HU": "bud",
+	"TR": "ist", "GR": "ath", "LV": "rix", "LT": "vno", "EE": "tll",
+	"RS": "beg", "IL": "tlv", "AE": "dxb", "IN": "bom", "SG": "sin",
+	"JP": "tokyo", "HK": "hkg", "KR": "seoul", "AU": "syd", "ZA": "jnb",
+	// Узел — крупнейшая точка обмена трафиком страны, а не столица сама
+	// по себе: у Вьетнама это Сайгон, у Пакистана — Карачи.
+	"CN": "sha", "TW": "tpe", "TH": "bkk", "VN": "sgn", "ID": "cgk",
+	"MY": "kul", "PH": "mnl", "PK": "khi", "BD": "dac",
+	"MX": "mex", "AR": "eze", "CL": "scl", "PE": "lim", "CO": "bog",
+	"EG": "cai", "NG": "lagos", "SA": "ruh", "NZ": "akl",
+	"GE": "tbs", "AM": "evn",
+}
+
+// HubOf — координаты главного узла связи страны.
+func HubOf(country string) (Place, bool) {
+	code, ok := hubs[strings.ToUpper(country)]
+	if !ok {
+		return Place{}, false
+	}
+	p, ok := cityCodes[code]
+	return p, ok
 }
 
 // PlaceFromHost вытаскивает город из имени роутера.

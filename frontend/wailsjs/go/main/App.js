@@ -6,6 +6,10 @@ export function ApplyWindowScale() {
   return window['go']['main']['App']['ApplyWindowScale']();
 }
 
+export function CancelCheck() {
+  return window['go']['main']['App']['CancelCheck']();
+}
+
 export function Catalog() {
   return window['go']['main']['App']['Catalog']();
 }

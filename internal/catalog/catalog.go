@@ -14,9 +14,6 @@ const (
 	GroupGeo    = "geo"     // сервис сам не пускает по стране
 )
 
-// Groups — порядок групп в интерфейсе.
-var Groups = []string{GroupRunet, GroupGlobal, GroupBlock, GroupGeo}
-
 type Service struct {
 	ID    string `json:"id"`
 	Host  string `json:"host"`
@@ -100,12 +97,6 @@ var byID = func() map[string]Service {
 	return m
 }()
 
-// Get возвращает сервис по идентификатору.
-func Get(id string) (Service, bool) {
-	s, ok := byID[id]
-	return s, ok
-}
-
 // Item — запись справочника на одном языке: ровно то, что рисует интерфейс.
 type Item struct {
 	ID    string `json:"id"`
@@ -144,15 +135,6 @@ var Presets = map[string][]string{
 	// только то, что режут
 	"blocked": {"youtube", "discord", "instagram", "facebook", "x", "signal",
 		"linkedin", "telegram", "whatsapp", "viber", "tiktok", "twitch", "rutracker"},
-}
-
-// All — идентификаторы всех сервисов справочника.
-func All() []string {
-	ids := make([]string, 0, len(Services))
-	for _, s := range Services {
-		ids = append(ids, s.ID)
-	}
-	return ids
 }
 
 // Custom — цель, добавленная пользователем вручную.

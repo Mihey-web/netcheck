@@ -3,11 +3,14 @@
    Проприетарный шрифт SE заменён на системный Bahnschrift. */
 
 :root{
+ /* тема тёмная всегда — без color-scheme WebView2 при светлой теме Windows
+    рисует белые select и скроллбары */
+ color-scheme:dark;
  --void:#04070c;
  --panel:rgba(7,12,19,.88); --surface:#0b1119; --surface-2:#131c27;
  --line:#1a2634; --line-2:#243447;
  --hud:#5fd9f5; --hud-dim:#2b6a80;
- --ink:#e9f4fb; --ink-2:#9db1c4; --muted:#63788c;
+ --ink:#e9f4fb; --ink-2:#9db1c4; --ink-3:#6b7c93; --muted:#63788c;
  --good:#3ad684; --warn:#ffc233; --serious:#ff8a4c; --crit:#ff4d5e;
  --mono:"Cascadia Mono",Consolas,ui-monospace,SFMono-Regular,monospace;
  --hudfont:'Bahnschrift SemiBold Condensed','Bahnschrift','Segoe UI',sans-serif;
@@ -23,6 +26,9 @@ body{margin:0;color:var(--ink);background:var(--void);
  font-family:"Segoe UI",system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased;
  display:flex;flex-direction:column;overflow:hidden;
  user-select:none;cursor:default}
+/* вердикт, предупреждения, таблицу и значения окружения можно выделять
+   и копировать — иначе текст ошибки не унести даже в поиск */
+.vtext,.vnote,table,.kv .v{user-select:text}
 .scanlines{position:fixed;inset:0;pointer-events:none;z-index:60;opacity:.22;
  background:repeating-linear-gradient(rgba(120,200,230,.035) 0 1px,rgba(0,0,0,0) 1px 3px)}
 
@@ -87,6 +93,16 @@ main{flex:1 1 auto;min-height:0;display:grid;gap:10px;padding:10px 12px 12px;
  background:linear-gradient(180deg,#2c5563,#1d3d4a);box-shadow:none}
 .runbtn:disabled:hover{background:linear-gradient(180deg,#2c5563,#1d3d4a);box-shadow:none}
 .runbtn:disabled small{color:#6d99a6}
+/* во время прогона кнопка — «Отменить»: тёплый цвет, чтобы не путалась с запуском */
+.runbtn.cancel:not(:disabled){color:#2b1503;
+ background:linear-gradient(180deg,#ffc98e,#e29142);box-shadow:0 0 12px rgba(245,177,95,.22)}
+.runbtn.cancel:not(:disabled):hover{background:linear-gradient(180deg,#ffd6a5,#eea057);
+ box-shadow:0 0 18px rgba(245,177,95,.38)}
+.runbtn.cancel:not(:disabled) small{color:#4a300a}
+
+/* конфиг не прочитался — тихая жёлтая строка под кнопкой */
+.cfg-err{font-family:var(--mono);font-size:10px;line-height:1.35;color:#e2b25a;
+ padding:4px 2px 0}
 
 /* ——— окружение ——— */
 .kv{display:flex;align-items:baseline;gap:8px;font-size:11px;padding:3.5px 0;
@@ -103,16 +119,16 @@ main{flex:1 1 auto;min-height:0;display:grid;gap:10px;padding:10px 12px 12px;
 .hist{flex:1;min-height:0;display:flex;flex-direction:column}
 .hist .bd{flex:1;min-height:0;overflow:auto;scrollbar-width:thin;scrollbar-color:#22384a transparent;
  display:flex;flex-direction:column;gap:1px;padding:6px 7px 8px}
+/* строка истории кликабельна — открывает сохранённый прогон */
 .hrow{display:flex;align-items:baseline;gap:8px;padding:5px 7px 4px;font-family:var(--mono);
  font-size:10.5px;color:var(--ink-2);background:rgba(255,255,255,.02);border-left:2px solid var(--muted);
- cursor:default;white-space:nowrap}
+ cursor:pointer;white-space:nowrap}
 .hrow:hover{background:rgba(95,217,245,.07)}
 .hrow .t{color:var(--ink);font-variant-numeric:tabular-nums;flex:none}
 .hrow .s{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .hrow.ok{border-left-color:var(--good)}
 .hrow.warn{border-left-color:var(--warn)}
 .hrow.bad{border-left-color:var(--serious)}
-.hrow.crit{border-left-color:var(--crit)}
 .hrow.skip{border-left-color:var(--muted)}
 .hrow.cur{background:rgba(95,217,245,.10);box-shadow:inset 0 0 0 1px rgba(95,217,245,.35)}
 .hrow.cur .t::after{content:'◄';margin-left:6px;font-size:8px;color:var(--hud)}
@@ -131,6 +147,8 @@ main{flex:1 1 auto;min-height:0;display:grid;gap:10px;padding:10px 12px 12px;
 .hist.busy .hrow{cursor:default;opacity:.55}
 .hist.busy .hrow:hover{background:rgba(255,255,255,.02)}
 .hist.busy .hdel{display:none}
+/* ошибка операций с историей — у самой панели, а не вместо вердикта */
+.hist-err{flex:none;padding:4px 7px 3px;font-family:var(--mono);font-size:10px;color:var(--crit)}
 
 /* ——— вердикт ——— */
 .verdict{flex:none}
@@ -158,6 +176,11 @@ main{flex:1 1 auto;min-height:0;display:grid;gap:10px;padding:10px 12px 12px;
 .tc.svc{margin-left:auto;color:var(--ink-2);gap:0}
 .tc.svc b{color:var(--hud);margin-left:5px}
 .tc.svc i{font-style:normal}
+/* подпись «напрямую» / «через VPN»: без неё счётчик молчаливо означал
+   «напрямую», а у человека с VPN это втрое меньше правды */
+.tc.svc em{font-style:normal;font-size:10px;letter-spacing:.06em;
+ color:var(--muted);margin-left:6px}
+.tc.svc + .tc.svc{margin-left:14px}
 
 /* ═══ вкладка «Сервисы» ═══ */
 .svcview{display:flex;padding:12px;gap:12px;min-height:0;overflow:hidden}
@@ -201,6 +224,8 @@ main{flex:1 1 auto;min-height:0;display:grid;gap:10px;padding:10px 12px 12px;
 .svc-foot select{background:var(--surface);border:1px solid var(--line-2);
  color:var(--ink);padding:5px 7px;font:inherit;font-size:11px}
 .svc-note{margin:0;padding:0 10px 9px;font-size:10px;color:var(--ink-2)}
+/* ошибка валидации своего адреса */
+.svc-err{margin:0;padding:6px 10px 0;font-size:10.5px;color:var(--crit)}
 .empty.warn{color:var(--warn)}
 
 /* слой не проверялся — прогон оборвали ниже; гасим, а не красим тревожным */
@@ -214,14 +239,12 @@ main{flex:1 1 auto;min-height:0;display:grid;gap:10px;padding:10px 12px 12px;
 .vtext{padding:2px 12px 6px;font-size:12.5px;line-height:1.5;color:var(--ink)}
 .vtext p{margin:0 0 5px}
 .vtext p:last-child{margin-bottom:0}
-.vtext b{font-weight:600;color:var(--ink)}
 .vtext .svc{color:var(--serious)}
 .vtext .verr{color:var(--crit);font-family:var(--mono);font-size:11px}
 .vtext .dim{color:var(--muted)}
 .vnote{margin:2px 12px 11px;padding:6px 10px;font-size:11.5px;line-height:1.45;color:var(--warn);
  border:1px solid rgba(255,194,51,.35);border-left:3px solid var(--warn);background:rgba(255,194,51,.05)}
 .vnote b{font-weight:600}
-.vhint{margin:0 12px 10px;font-family:var(--mono);font-size:10px;letter-spacing:.04em;color:var(--muted)}
 .hidden{display:none}
 
 /* ——— таблица тестов ——— */
@@ -240,7 +263,6 @@ td.layer{font-family:var(--hudfont);font-size:9.5px;letter-spacing:.14em;color:v
 tr.warngrp td.layer{color:var(--warn)}
 tr.badgrp td.layer{color:var(--serious)}
 td.tgt{color:var(--ink);max-width:220px;overflow:hidden;text-overflow:ellipsis}
-td.tgt .at{color:var(--muted)}
 td.mth{color:var(--ink-2);width:74px}
 td.path{width:88px;color:var(--ink-2)}
 td.path.px{color:var(--hud)}
@@ -252,14 +274,10 @@ td.res{width:44%;max-width:0;overflow:hidden;text-overflow:ellipsis}
 .st.fail{color:var(--crit)}
 .st.skip{color:var(--muted)}
 td.res .why{color:var(--ink-2)}
-td.res .why em{font-style:normal;color:var(--muted)}
 td.empty-cell{padding:14px 12px;color:var(--muted);white-space:normal}
 
 /* ——— пустые состояния ——— */
 .empty{padding:8px 6px;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
-
-/* строка истории кликабельна — открывает сохранённый прогон */
-.hrow{cursor:pointer}
 
 /* ——— карта: холст с географией + DOM-слой меток ——— */
 .map-bar{display:flex;align-items:center;gap:12px;padding:7px 11px 4px;flex-wrap:wrap}
@@ -286,6 +304,10 @@ td.empty-cell{padding:14px 12px;color:var(--muted);white-space:normal}
  white-space:nowrap;text-shadow:0 0 4px #04070c,0 0 8px #04070c}
 .mlab.left{transform:translateX(-100%)}
 .mlab.pin{color:var(--hud)}
+/* выноска от точки к вынесенной подписи: без неё столбец у края карты
+   не привязан ни к чему и читается как отдельный список */
+.mlead{position:absolute;height:0;border-top:1px dotted rgba(120,160,190,.5);
+ transform-origin:0 0;pointer-events:none}
 .mpin{position:absolute;width:11px;height:11px;margin:-5.5px 0 0 -5.5px;
  border:1.5px solid var(--hud);pointer-events:auto}
 .mpin.here{transform:rotate(45deg);border-radius:1px}
@@ -305,7 +327,7 @@ td.empty-cell{padding:14px 12px;color:var(--muted);white-space:normal}
 /* Полый кружок — сервис отвечает, но маршрут дальше не прослеживается.
    Ничего не сломано, просто не видно, поэтому и отметка приглушённая. */
 .mdim{position:absolute;width:7px;height:7px;margin:-3.5px 0 0 -3.5px;border-radius:50%;
-  border:1.5px solid var(--ink-3, #6b7c93);background:transparent;opacity:.75;pointer-events:auto}
+  border:1.5px solid var(--ink-3);background:transparent;opacity:.75;pointer-events:auto}
 .mlab.bad{color:var(--crit)}
 
 /* ——— настройки ——— */
@@ -362,14 +384,6 @@ main.hidden{display:none}
 /* холст рисует по фактическому размеру контейнера, поэтому у обёртки
    должна быть настоящая высота — иначе карта схлопывается в ноль */
 .map-wrap{position:relative;flex:1;min-width:0;min-height:260px;width:100%;margin:0}
-#map-svg{display:block;width:100%;height:auto}
-#map-svg .sea{fill:#060b12}
-#map-svg .grat path{stroke:rgba(95,217,245,.055);stroke-width:.4;fill:none}
-#map-svg .land{fill:#14212f;stroke:rgba(95,217,245,.38);stroke-width:.45;
- stroke-linejoin:round;stroke-linecap:round}
-#map-svg .hole{fill:#060b12;stroke:rgba(95,217,245,.2);stroke-width:.3}
-#map-svg.dim .land{fill:#0e1620;stroke:rgba(120,140,160,.25)}
-#map-svg .geoline{stroke:var(--hud);stroke-width:.7;stroke-dasharray:3 3;fill:none;opacity:.75}
 
 .map-overlay{position:absolute;inset:0;pointer-events:none}
 .map-overlay>*{pointer-events:auto}
@@ -379,34 +393,6 @@ main.hidden{display:none}
 .map-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
  font-family:var(--hudfont);font-size:13px;letter-spacing:.22em;text-transform:uppercase;
  color:var(--muted);background:rgba(4,7,12,.3)}
-
-/* точки якорей */
-.mk{position:absolute;transform:translate(-50%,-50%);z-index:3;width:9px;height:9px}
-.mk:hover{z-index:9}
-.mk .dot{position:absolute;inset:0;margin:auto;width:7px;height:7px;border-radius:50%;
- background:var(--good);box-shadow:0 0 7px rgba(58,214,132,.85),0 0 2px rgba(0,0,0,.8)}
-.mk.warn .dot{background:var(--warn);box-shadow:0 0 7px rgba(255,194,51,.85),0 0 2px rgba(0,0,0,.8)}
-.mk.fail .dot{background:var(--crit);box-shadow:0 0 8px rgba(255,77,94,.9),0 0 2px rgba(0,0,0,.8)}
-.mk .lbl{position:absolute;left:12px;top:50%;transform:translateY(-50%);white-space:nowrap;
- font-family:var(--mono);font-size:9.5px;letter-spacing:.03em;color:var(--ink-2);
- text-shadow:0 0 4px #000,0 1px 3px #000;pointer-events:none}
-.mk.left .lbl{left:auto;right:12px}
-.mk.fail .lbl{color:var(--crit)}
-.mk.quiet .lbl{opacity:0;transition:opacity .12s}
-.mk:hover .lbl{opacity:1;color:var(--ink)}
-.mk.fail:hover .lbl{color:var(--crit)}
-
-/* метки выхода: ромбы */
-.gp{position:absolute;transform:translate(-50%,-50%);z-index:4;width:13px;height:13px}
-.gp:hover{z-index:10}
-.gp .pin{position:absolute;inset:0;margin:auto;width:8px;height:8px;transform:rotate(45deg);
- background:rgba(255,194,51,.12);border:1.5px solid var(--warn);box-shadow:0 0 8px rgba(255,194,51,.7)}
-.gp.vpn .pin{background:rgba(95,217,245,.12);border-color:var(--hud);box-shadow:0 0 8px rgba(95,217,245,.8)}
-.gp .lbl{position:absolute;left:14px;top:50%;transform:translateY(-50%);white-space:nowrap;
- font-family:var(--mono);font-size:9.5px;color:var(--warn);
- text-shadow:0 0 4px #000,0 1px 3px #000;pointer-events:none}
-.gp.vpn .lbl{color:var(--hud)}
-.gp.left .lbl{left:auto;right:14px}
 
 /* легенда и честная подпись */
 .map-foot{flex:none;padding:7px 12px 10px;border-top:1px solid var(--line)}

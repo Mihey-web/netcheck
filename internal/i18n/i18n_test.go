@@ -1,9 +1,40 @@
 package i18n
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// verbRe — format-verbs вида %s/%d/%v; %% — не verb.
+var verbRe = regexp.MustCompile(`%[a-zA-Z]`)
+
+func verbs(s string) []string {
+	return verbRe.FindAllString(strings.ReplaceAll(s, "%%", ""), -1)
+}
+
+// TestMessagesComplete — полнота словаря: у каждого ключа есть непустые RU и EN,
+// а format-verbs совпадают по числу и порядку. Конкретные тексты не проверяются:
+// формулировки — не контракт, контракт — ключи и подстановки.
+func TestMessagesComplete(t *testing.T) {
+	for id, m := range messages {
+		ru, okRU := m[RU]
+		en, okEN := m[EN]
+		if !okRU || ru == "" {
+			t.Errorf("%s: нет русского текста", id)
+		}
+		if !okEN || en == "" {
+			t.Errorf("%s: нет английского текста", id)
+		}
+		if !okRU || !okEN {
+			continue
+		}
+		vr, ve := verbs(ru), verbs(en)
+		if strings.Join(vr, ",") != strings.Join(ve, ",") {
+			t.Errorf("%s: format-verbs расходятся: ru=%v en=%v", id, vr, ve)
+		}
+	}
+}
 
 func TestTBothLanguages(t *testing.T) {
 	ru := T(RU, "warn.proxy_bypass")

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	xproxy "golang.org/x/net/proxy"
+	"golang.org/x/net/publicsuffix"
 )
 
 // BrowserUA — представляемся браузером. С «netcheck/1.0» mail.ru отдаёт 302
@@ -27,6 +28,11 @@ const BrowserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 // от роботов у разных площадок стоят на разной глубине, и 256 байт хватало
 // только Cloudflare.
 const bodyPeek = 4 << 10
+
+// OutCanceled — прогон отменили раньше, чем проба успела кончиться.
+// Это не факт о сети, а факт о нас: analyze обязан игнорировать такой
+// исход, иначе закрытие окна посреди прогона рисовало бы блокировки.
+const OutCanceled Outcome = "canceled"
 
 // classifyErr — КАК проба кончилась. Это ключ ко всей диагностике: молчание
 // до конца бюджета означает вмешательство по пути, а быстрый отказ — что
@@ -43,6 +49,11 @@ func classifyErr(err error) Outcome {
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return OutTimeout
+	}
+	// Отмена — не исход пробы, а обрыв прогона. Свалить её в OutOther
+	// значило бы строить вердикт на пробах, которым не дали закончиться.
+	if errors.Is(err, context.Canceled) {
+		return OutCanceled
 	}
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
@@ -189,6 +200,9 @@ func HTTPGet(ctx context.Context, rawURL string, proxy *url.URL, pinIP string) R
 		r.Path = PathProxy
 	}
 	tr := &http.Transport{DisableKeepAlives: true, ForceAttemptHTTP2: true}
+	// Transport создаётся на каждый вызов: без явного закрытия соединения
+	// доживали бы до конца прогона, и полный прогон тёк сокетами.
+	defer tr.CloseIdleConnections()
 	if proxy != nil {
 		tr.Proxy = http.ProxyURL(proxy)
 	} else if pinIP != "" {
@@ -255,24 +269,62 @@ func HTTPGet(ctx context.Context, rawURL string, proxy *url.URL, pinIP string) R
 	// 31 цель из 52 отдаёт редирект на GET /, и разбирать их здесь по двум
 	// последним меткам домена значило записывать в заглушки живые dzen.ru
 	// и mail.ru.
+	r.Challenge = IsChallenge(r)
+
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		r.Status, r.Detail = StatusOK, fmt.Sprintf("%d", resp.StatusCode)
 	case resp.StatusCode >= 300 && resp.StatusCode < 400:
 		r.Status, r.Detail = StatusOK, fmt.Sprintf("%d -> %s", resp.StatusCode, r.Location)
+	case r.Challenge:
+		// Предупреждение, а не отказ: сервер ответил, путь до него чист,
+		// а решить проверку «я не робот» наш клиент не может по устройству.
+		r.Status, r.Detail = StatusWarn, fmt.Sprintf("проверка «я не робот» (http %d)", resp.StatusCode)
 	default:
 		r.Status, r.Detail = StatusFail, fmt.Sprintf("http %d", resp.StatusCode)
 	}
 	return r
 }
 
+// IsChallenge — ответ является проверкой «я не робот». Эвристика одна
+// на probe и analyze: пока у каждого была своя копия, challenge на 403
+// ловился, а тот же challenge на 503 записывался в «сервис лежит».
+//
+// Cloudflare помечает такой ответ заголовком Cf-Mitigated: challenge;
+// у прочих (DataDome, Qrator) остаётся узнаваемая страница. Коды берём
+// все три, какими эту проверку отдают: 403, 429 и 503.
+func IsChallenge(r Result) bool {
+	switch r.Code {
+	case 403, 429, 503:
+	default:
+		return false
+	}
+	// Только значение "challenge": Cf-Mitigated: block — это блок,
+	// и принимать его за проверку «я не робот» значило звать блокировку
+	// «в браузере откроется».
+	if r.CFMitigated == "challenge" {
+		return true
+	}
+	b := strings.ToLower(r.Body)
+	return strings.Contains(b, "just a moment") ||
+		strings.Contains(b, "cf-challenge") ||
+		strings.Contains(b, "challenges.cloudflare.com") ||
+		// DataDome грузит капчу с captcha-delivery.com; голое слово
+		// «captcha» ловило и формы обратной связи на обычных страницах.
+		strings.Contains(b, "captcha-delivery.com")
+}
+
 // SameSite — ведёт ли редирект на тот же сайт. Нужен analyze при разборе
 // заглушек.
 func SameSite(reqHost, locHost string) bool { return sameSite(reqHost, locHost) }
 
-// sameSite — сравниваем две последние метки домена: ya.ru→ya.ru,
-// vk.com→m.vk.com, wikipedia.org→www.wikipedia.org — свои;
-// youtube.com→block.isp.ru — чужой. Пустой Location (относительный) — свой.
+// sameSite — сравниваем сайты по eTLD+1: ya.ru→ya.ru, vk.com→m.vk.com,
+// wikipedia.org→www.wikipedia.org — свои; youtube.com→block.isp.ru — чужой.
+// Пустой Location (относительный) — свой.
+//
+// Именно eTLD+1, а не «две последние метки»: на co.uk/com.tr/spb.ru сайт
+// задаётся тремя метками, и block.isp.co.uk сходил за «тот же сайт»,
+// что и site.co.uk.
 func sameSite(reqHost, locHost string) bool {
 	if locHost == "" {
 		return true
@@ -282,11 +334,10 @@ func sameSite(reqHost, locHost string) bool {
 			h = h[:i] // отрезаем порт
 		}
 		h = strings.TrimSuffix(strings.ToLower(h), ".")
-		parts := strings.Split(h, ".")
-		if len(parts) <= 2 {
-			return h
+		if s, err := publicsuffix.EffectiveTLDPlusOne(h); err == nil {
+			return s
 		}
-		return strings.Join(parts[len(parts)-2:], ".")
+		return h // голый суффикс или мусор — сравниваем как есть
 	}
 	return base(reqHost) == base(locHost)
 }

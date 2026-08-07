@@ -25,13 +25,18 @@ import (
 	"net/netip"
 	"sort"
 	"strings"
+	"time"
 )
 
 const (
 	magic   = "NCGEO1"
-	version = 1
-	// headerLen — magic(6) + версия(1) + резерв(1) + три счётчика по 4.
-	headerLen = 8 + 12
+	version = 2
+	// headerLenV1 — magic(6) + версия(1) + резерв(1) + три счётчика по 4.
+	headerLenV1 = 8 + 12
+	// headerLen — заголовок версии 2: к V1 добавлена дата выпуска данных
+	// (uint32, десятичное YYYYMMDD, 0 — неизвестна). Старые файлы версии 1
+	// Open продолжает читать: устаревшая база — не повод потерять карту.
+	headerLen = headerLenV1 + 4
 
 	countryRec = 4 + 2     // start, упакованный код
 	asnRec     = 4 + 4 + 4 // start, номер AS, смещение имени
@@ -69,13 +74,23 @@ type DB struct {
 	aName  []uint32 // смещение в names
 
 	names string
-	n     int // сколько непустых диапазонов, для Len
+	n     int    // сколько непустых диапазонов, для Len
+	date  uint32 // дата выпуска данных, YYYYMMDD; 0 — файл её не нёс
 }
 
-// Build пишет базу. Диапазоны обязаны идти по возрастанию и не пересекаться:
-// молча склеивать чужие данные — верный способ потом объяснять пользователю,
-// что его провайдер находится в Парагвае.
+// Build пишет базу без даты выпуска. Оставлен ради вызывающих, которым
+// дата не важна (тесты); генератор пользуется BuildReleased.
 func Build(w io.Writer, cs []Country, as []ASN) error {
+	return BuildReleased(w, cs, as, time.Time{})
+}
+
+// BuildReleased пишет базу. Диапазоны обязаны идти по возрастанию и не
+// пересекаться: молча склеивать чужие данные — верный способ потом объяснять
+// пользователю, что его провайдер находится в Парагвае.
+//
+// released — дата выпуска исходных данных (нулевое время — неизвестна):
+// без неё устаревшая на годы база неотличима от свежей.
+func BuildReleased(w io.Writer, cs []Country, as []ASN, released time.Time) error {
 	if err := checkCountries(cs); err != nil {
 		return err
 	}
@@ -126,6 +141,7 @@ func Build(w io.Writer, cs []Country, as []ASN) error {
 	binary.LittleEndian.PutUint32(head[8:], uint32(len(cTable)/countryRec))
 	binary.LittleEndian.PutUint32(head[12:], uint32(len(aTable)/asnRec))
 	binary.LittleEndian.PutUint32(head[16:], uint32(len(names)))
+	binary.LittleEndian.PutUint32(head[20:], packDate(released))
 
 	for _, part := range [][]byte{head, cTable, aTable, names} {
 		if _, err := w.Write(part); err != nil {
@@ -192,6 +208,16 @@ func checkASNs(as []ASN) error {
 
 func packCode(s string) uint16 { return uint16(s[0])<<8 | uint16(s[1]) }
 
+// packDate — дата как десятичное YYYYMMDD: читается глазами в hex-дампе
+// хуже, чем в выводе программы, зато однозначно и не зависит от зон.
+func packDate(t time.Time) uint32 {
+	if t.IsZero() {
+		return 0
+	}
+	y, m, d := t.UTC().Date()
+	return uint32(y)*10000 + uint32(m)*100 + uint32(d)
+}
+
 func unpackCode(v uint16) string {
 	if v == 0 {
 		return ""
@@ -203,21 +229,32 @@ func unpackCode(v uint16) string {
 // база живёт всё время работы программы, а исходный буфер после этого
 // можно отдать сборщику мусора.
 func Open(raw []byte) (*DB, error) {
-	if len(raw) < headerLen {
+	if len(raw) < headerLenV1 {
 		return nil, fmt.Errorf("ipdb: база обрезана: %d байт", len(raw))
 	}
 	if string(raw[:len(magic)]) != magic {
 		return nil, fmt.Errorf("ipdb: не наш формат")
 	}
-	if v := raw[len(magic)]; v != version {
+	// Версию 1 читаем по-прежнему: у неё заголовок без даты выпуска.
+	// Отвергать старый файл из-за поля, которого он не мог нести, — значит
+	// ломать карту у всех, кто не пересобрал базу.
+	v := raw[len(magic)]
+	if v != 1 && v != version {
 		return nil, fmt.Errorf("ipdb: версия формата %d, читать умеем %d", v, version)
+	}
+	hdr := headerLen
+	if v == 1 {
+		hdr = headerLenV1
+	}
+	if len(raw) < hdr {
+		return nil, fmt.Errorf("ipdb: база обрезана: %d байт", len(raw))
 	}
 
 	nc := binary.LittleEndian.Uint32(raw[8:])
 	na := binary.LittleEndian.Uint32(raw[12:])
 	nn := binary.LittleEndian.Uint32(raw[16:])
 
-	want := int64(headerLen) + int64(nc)*countryRec + int64(na)*asnRec + int64(nn)
+	want := int64(hdr) + int64(nc)*countryRec + int64(na)*asnRec + int64(nn)
 	if int64(len(raw)) != want {
 		return nil, fmt.Errorf("ipdb: заголовок обещает %d байт, а их %d", want, len(raw))
 	}
@@ -229,8 +266,11 @@ func Open(raw []byte) (*DB, error) {
 		aNum:   make([]uint32, na),
 		aName:  make([]uint32, na),
 	}
+	if v >= 2 {
+		db.date = binary.LittleEndian.Uint32(raw[20:])
+	}
 
-	p := raw[headerLen:]
+	p := raw[hdr:]
 	for i := range db.cStart {
 		db.cStart[i] = binary.LittleEndian.Uint32(p[i*countryRec:])
 		db.cCode[i] = binary.LittleEndian.Uint16(p[i*countryRec+4:])
@@ -295,3 +335,12 @@ func (db *DB) name(off uint32) string {
 // Len — сколько в базе непустых диапазонов. Ноль означает, что база
 // собрана без данных, и карта обязана об этом сказать, а не молчать.
 func (db *DB) Len() int { return db.n }
+
+// Released — дата выпуска данных в формате YYYY-MM-DD. Пустая строка —
+// файл собран до появления даты в формате (версия 1) или без неё.
+func (db *DB) Released() string {
+	if db.date == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%04d-%02d-%02d", db.date/10000, db.date/100%100, db.date%100)
+}

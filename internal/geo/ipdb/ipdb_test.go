@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 )
 
 // build — собирает базу из диапазонов и сразу открывает её.
@@ -188,5 +189,58 @@ func TestLen(t *testing.T) {
 	db := build(t, testCountries, testASNs)
 	if got, want := db.Len(), len(testCountries)+len(testASNs); got != want {
 		t.Errorf("Len() = %d, хотели %d", got, want)
+	}
+}
+
+// Дата выпуска данных едет в заголовке и возвращается как есть: без неё
+// устаревшая на годы база неотличима от свежей.
+func TestReleasedDate(t *testing.T) {
+	var buf bytes.Buffer
+	released := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	if err := BuildReleased(&buf, testCountries, testASNs, released); err != nil {
+		t.Fatalf("BuildReleased: %v", err)
+	}
+	db, err := Open(buf.Bytes())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if got := db.Released(); got != "2026-08-07" {
+		t.Errorf("Released() = %q, хотели 2026-08-07", got)
+	}
+	if got := db.Lookup(ip(t, "8.8.8.8")); got != (Record{"US", 15169, "Google LLC"}) {
+		t.Errorf("данные после добавления даты поехали: %+v", got)
+	}
+
+	// Build без даты обязан честно отвечать «неизвестна», а не выдумывать.
+	db = build(t, testCountries, testASNs)
+	if got := db.Released(); got != "" {
+		t.Errorf("Released() без даты = %q, хотели пустую строку", got)
+	}
+}
+
+// Старые файлы версии 1 (без даты в заголовке) обязаны открываться:
+// пересборка базы — не условие работы карты.
+func TestOpenReadsVersion1(t *testing.T) {
+	// Пустая база в формате v1, собранная руками: magic, версия 1, резерв,
+	// три нулевых счётчика — и ни байта больше.
+	raw := append([]byte(magic), 1, 0)
+	raw = append(raw, make([]byte, 12)...)
+
+	db, err := Open(raw)
+	if err != nil {
+		t.Fatalf("Open(v1): %v", err)
+	}
+	if got := db.Released(); got != "" {
+		t.Errorf("Released() у файла v1 = %q, хотели пустую строку", got)
+	}
+	if got := db.Lookup(ip(t, "8.8.8.8")); got != (Record{}) {
+		t.Errorf("Lookup в пустой v1-базе = %+v, хотели пустую запись", got)
+	}
+
+	// Будущую версию 3 по-прежнему не читаем: угадывать раскладку нельзя.
+	bad := append([]byte(magic), 3, 0)
+	bad = append(bad, make([]byte, 16)...)
+	if _, err := Open(bad); err == nil {
+		t.Error("Open принял версию 3, хотели ошибку")
 	}
 }

@@ -4,7 +4,6 @@
 export const STR = {
   // шапка
   'app.tagline':   {ru: 'диагностика интернета', en: 'internet diagnostics'},
-  'lang.switch':   {ru: 'Язык интерфейса',       en: 'Interface language'},
   'gear.title':    {ru: 'Настройки', en: 'Settings'},
 
   // настройки
@@ -38,9 +37,13 @@ export const STR = {
 
   // кнопка
   'btn.run':       {ru: 'Проверить',       en: 'Run check'},
-  'btn.running':   {ru: 'Идёт проверка…',  en: 'Checking…'},
   'btn.lastrun':   {ru: 'последний прогон', en: 'last run'},
   'btn.norun':     {ru: 'ещё не запускалась', en: 'no runs yet'},
+  // во время прогона кнопка запуска превращается в отмену
+  'btn.cancel':    {ru: 'Отменить',        en: 'Cancel'},
+  'btn.canceling': {ru: 'Останавливаю…',   en: 'Stopping…'},
+  // счётчик прогресса на кнопке: %n целей проверено из %t
+  'btn.progress':  {ru: '%n из %t',        en: '%n of %t'},
 
   // панели
   'panel.env':     {ru: 'Окружение',        en: 'Environment'},
@@ -52,7 +55,7 @@ export const STR = {
   'env.net':       {ru: 'Сеть',   en: 'Network'},
   'env.gateway':   {ru: 'Шлюз',   en: 'Gateway'},
   'env.ip':        {ru: 'IP',     en: 'IP'},
-  'env.vpn':       {ru: 'VPN-признаки', en: 'VPN signs'},
+  'env.vpn':       {ru: 'VPN-признаки', en: 'VPN indicators'},
   'env.proxy':     {ru: 'прокси', en: 'proxy'},
   'env.sysproxy':  {ru: 'Сист. прокси Windows', en: 'Windows system proxy'},
   'env.tunnels':   {ru: 'Туннель-адаптеры', en: 'Tunnel adapters'},
@@ -96,22 +99,23 @@ export const STR = {
                       en: 'Press “Run check” to start diagnostics.'},
   'verdict.running': {ru: 'Идёт проверка…', en: 'Checking…'},
   'err.run':         {ru: 'Ошибка прогона', en: 'Run failed'},
-  'hint.lang':       {ru: 'Текст вердикта обновится на выбранном языке при следующей проверке.',
-                      en: 'The verdict text will switch to the selected language on the next run.'},
+  // конфиг не прочитался — прогон идёт с настройками по умолчанию
+  'cfg.err':         {ru: 'Файл настроек не прочитался — действуют настройки по умолчанию.',
+                      en: 'The settings file could not be read — defaults are in effect.'},
 
   // история
   'hist.empty':      {ru: 'нет данных', en: 'no data'},
   'hist.open':       {ru: 'Открыть этот прогон', en: 'Open this run'},
-  'hist.yesterday':  {ru: 'вчера',      en: 'yest.'},
+  'hist.yesterday':  {ru: 'вчера',      en: 'yesterday'},
   'hist.clear':      {ru: 'Очистить',   en: 'Clear'},
   'hist.clear.title':{ru: 'Удалить всю историю прогонов', en: 'Delete the whole run history'},
   'hist.del':        {ru: 'Удалить этот прогон', en: 'Delete this run'},
   'hist.busy':       {ru: 'Идёт проверка — история недоступна', en: 'Check in progress — history is locked'},
-  'hist.confirm.title': {ru: 'Очистить историю?', en: 'Clear history?'},
   'hist.confirm.all':{ru: 'Будут удалены все сохранённые прогоны вместе с отчётами — %n. Отменить нельзя.',
                       en: 'All saved runs will be deleted along with their reports — %n. This cannot be undone.'},
   'hist.confirm.ok': {ru: 'Удалить',    en: 'Delete'},
   'hist.err':        {ru: 'Не удалось изменить историю', en: 'Could not modify the history'},
+  'hist.err.load':   {ru: 'Не удалось открыть этот прогон', en: 'Could not open this run'},
   'cnt.runs.one':    {ru: 'прогон',     en: 'run'},
   'cnt.runs.few':    {ru: 'прогона',    en: 'runs'},
   'cnt.runs.many':   {ru: 'прогонов',   en: 'runs'},
@@ -130,17 +134,16 @@ export const STR = {
   // карта
   'map.title':       {ru: 'Куда доходит трафик', en: 'How far traffic gets'},
   'map.empty':       {ru: 'Нажмите «Проверить»', en: 'Press “Run check”'},
-  'map.nolink':      {ru: 'нет связи', en: 'no link'},
   'map.legend.ok':   {ru: 'маршрут дошёл до цели', en: 'route reached the target'},
   'map.legend.warn': {ru: 'ответила ближайшая точка присутствия CDN', en: 'answered by the nearest CDN edge'},
   'map.legend.fail': {ru: 'путь оборвался здесь', en: 'path broke here'},
-  'map.legend.you':  {ru: 'ты здесь', en: 'you are here'},
+  'map.legend.you':  {ru: 'вы здесь', en: 'you are here'},
   'map.legend.vpn':  {ru: 'выход VPN', en: 'VPN exit'},
   'map.note.cdn':    {
-    ru: 'Рисуется маршрут до цели, а не «страна сервиса». У сервиса за CDN страны нет: отвечает ближайшая точка присутствия, и покрасить за это США значило бы обманывать себя. Зато измеримо, до какого места дошли пакеты — оно и отмечено. Точность бесплатных геобаз — страна, поэтому все шаги внутри одной страны показаны одной отметкой.',
-    en: 'What is drawn is the route to the target, not the “country of the service”. A service behind a CDN has no country: the nearest edge answers, and painting the US for that would be lying to yourself. What is measurable is how far the packets got — that is what gets marked. Free geo databases resolve to country at best, so every hop inside one country is shown as a single mark.',
+    ru: 'На карте — маршрут до цели, а не «страна сервиса»: у сервиса за CDN отвечает ближайшая точка присутствия. Отмечено то, что измеримо — докуда дошли пакеты. Шаг, место которого надёжно не известно, не показывается вовсе.',
+    en: 'The map shows the route to the target, not the “country of the service”: behind a CDN, the nearest edge answers. What gets marked is what is measurable — how far the packets got. A hop whose location is not reliably known is not drawn at all.',
   },
-  'map.geo.you':     {ru: 'ты здесь', en: 'you are here'},
+  'map.geo.you':     {ru: 'вы здесь', en: 'you are here'},
   'map.geo.vpn':     {ru: 'выход VPN', en: 'VPN exit'},
   'map.geo.off':     {ru: 'Определение страны выхода выключено в настройках.',
                       en: 'Exit-country detection is disabled in settings.'},
@@ -162,20 +165,24 @@ export const STR = {
   'set.geo_lookup':  {ru: 'Определять страну выхода (запрос к внешнему сервису)',
                       en: 'Detect exit country (external service request)'},
   'set.geo_note':    {
-    ru: 'Определение страны выхода — единственное место, где приложение сообщает наружу твой IP-адрес.',
+    ru: 'Определение страны выхода — единственное место, где приложение сообщает наружу ваш IP-адрес.',
     en: 'Exit-country detection is the only place where the app reveals your IP address to the outside.',
   },
 };
 
 /* ── общий счёт прогона ── */
 Object.assign(STR, {
-  'tally.ok': {ru: 'ОК', en: 'ok'},
+  'tally.ok': {ru: 'ОК', en: 'OK'},
   'tally.warn': {ru: 'медленно', en: 'slow'},
   'tally.skip': {ru: 'пропущено', en: 'skipped'},
   'cnt.fails.one': {ru: 'ошибка', en: 'failed'},
   'cnt.fails.few': {ru: 'ошибки', en: 'failed'},
   'cnt.fails.many': {ru: 'ошибок', en: 'failed'},
   'tally.services': {ru: 'сервисов работает', en: 'services working'},
+  // Без этих двух подписей счётчик молчаливо означал «напрямую», а человек
+  // с включённым VPN читал его как «у меня работает 7 из 25».
+  'tally.direct': {ru: 'напрямую', en: 'direct'},
+  'tally.via_vpn': {ru: 'через VPN', en: 'via VPN'},
 });
 
 /* ── вкладка «Сервисы» ── */
@@ -190,6 +197,15 @@ Object.assign(STR, {
   'svc.search_ph': {ru: 'Поиск по названию или адресу', en: 'Search by name or host'},
   'svc.custom_ph': {ru: 'свой адрес, например example.com', en: 'your own host, e.g. example.com'},
   'svc.add': {ru: 'Добавить', en: 'Add'},
+  // ошибки добавления своей цели: молча чистить поле — значит врать, что цель добавлена
+  'svc.err.host': {
+    ru: 'Не похоже на адрес: допустимы латиница, цифры, точки и дефисы, без пробелов.',
+    en: 'Does not look like a host: latin letters, digits, dots and hyphens only, no spaces.',
+  },
+  'svc.err.idn': {
+    ru: 'Кириллический домен введите в punycode (xn--…) — например, xn--d1acufc.xn--p1ai.',
+    en: 'Enter IDN domains in punycode (xn--…), e.g. xn--d1acufc.xn--p1ai.',
+  },
   'svc.remove': {ru: 'Убрать из списка', en: 'Remove from the list'},
   'svc.own': {ru: 'своя цель', en: 'your own target'},
   'svc.selected': {ru: 'выбрано %n из %t', en: '%n of %t selected'},

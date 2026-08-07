@@ -39,6 +39,17 @@ func Load() (*ipdb.DB, error) {
 	return db, err
 }
 
+// ReleaseDate — дата выпуска вшитых данных (YYYY-MM-DD). Пустая строка —
+// база не открылась или собрана без даты (старый формат): отчёт в этом
+// случае поля не несёт, а не показывает выдуманную свежесть.
+func ReleaseDate() string {
+	d, e := Load()
+	if e != nil {
+		return ""
+	}
+	return d.Released()
+}
+
 func open(raw []byte) (*ipdb.DB, error) {
 	gz, e := gzip.NewReader(bytes.NewReader(raw))
 	if e != nil {

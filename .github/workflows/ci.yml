@@ -1,9 +1,21 @@
 name: CI
 
+# push только по main: пуш в ветку с открытым PR и так гоняется через
+# pull_request, а "**" запускал оба прогона на каждый коммит.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+
+# CI только читает репозиторий; токену незачем уметь писать.
+permissions:
+  contents: read
+
+# Новый пуш в ту же ветку отменяет ещё бегущий старый прогон —
+# результат устаревшего коммита всё равно никому не нужен.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -11,14 +23,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Версия Go берётся из go.mod, а не дублируется здесь: одна правка
+      # при обновлении, и CI не может молча отстать от модуля.
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version-file: go.mod
           cache: true
 
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
       # go:embed all:frontend/dist требует, чтобы каталог существовал уже
       # на этапе компиляции, а в чистом клоне его нет: dist не хранится
@@ -30,8 +46,19 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # Сторонний экшен запинен по SHA коммита (тег v9.3.0), чтобы
+      # подмена тега в чужом репозитории не подменила код у нас.
+      # Набор линтеров — в .golangci.yml.
+      - name: Lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: latest
+
+      # -race требует cgo; на GitHub-раннере windows-latest стоит пригодный
+      # mingw-w64 gcc (локально на машине разработчика race не собирается —
+      # в PATH 32-битный gcc, поэтому детектор гоняется именно здесь).
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
 
       - name: Install Wails
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
