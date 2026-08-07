@@ -46,12 +46,20 @@ export function ListFonts() {
   return window['go']['main']['App']['ListFonts']();
 }
 
+export function MeasureSpeed(arg1) {
+  return window['go']['main']['App']['MeasureSpeed'](arg1);
+}
+
 export function Presets() {
   return window['go']['main']['App']['Presets']();
 }
 
 export function RunCheck() {
   return window['go']['main']['App']['RunCheck']();
+}
+
+export function RunSingle(arg1) {
+  return window['go']['main']['App']['RunSingle'](arg1);
 }
 
 export function SaveConfig(arg1) {

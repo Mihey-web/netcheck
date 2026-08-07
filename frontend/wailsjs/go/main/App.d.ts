@@ -4,6 +4,7 @@ import {catalog} from '../models';
 import {config} from '../models';
 import {history} from '../models';
 import {runner} from '../models';
+import {main} from '../models';
 
 export function ApplyWindowScale():Promise<void>;
 
@@ -27,9 +28,13 @@ export function GetRun(arg1:string):Promise<runner.Report>;
 
 export function ListFonts():Promise<Array<string>>;
 
+export function MeasureSpeed(arg1:string):Promise<main.SpeedResult>;
+
 export function Presets():Promise<Record<string, Array<string>>>;
 
 export function RunCheck():Promise<runner.Report>;
+
+export function RunSingle(arg1:string):Promise<runner.Report>;
 
 export function SaveConfig(arg1:config.Config):Promise<void>;
 

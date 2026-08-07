@@ -73,6 +73,37 @@ func TestResolve(t *testing.T) {
 	}
 }
 
+// SpeedURL обязан доехать до локализованного справочника — по нему фронт
+// решает, у кого рисовать кнопку замера.
+func TestSpeedURLPropagates(t *testing.T) {
+	if got := SpeedURL("youtube"); got != SpeedURLYouTube {
+		t.Errorf("SpeedURL(youtube) = %q, want %q", got, SpeedURLYouTube)
+	}
+	if got := SpeedURL("ya"); got != "" {
+		t.Errorf("у ya не должно быть замера, got %q", got)
+	}
+	for _, it := range Localized("ru") {
+		if it.ID == "youtube" && it.SpeedURL != SpeedURLYouTube {
+			t.Errorf("Localized: SpeedURL = %q, want %q", it.SpeedURL, SpeedURLYouTube)
+		}
+	}
+	// у каждого URL из speedURLs должен существовать сервис
+	for id := range speedURLs {
+		if _, ok := ByID(id); !ok {
+			t.Errorf("speedURLs ссылается на несуществующий ID %q", id)
+		}
+	}
+}
+
+func TestByID(t *testing.T) {
+	if _, ok := ByID("no-such-id"); ok {
+		t.Error("несуществующий ID не должен находиться")
+	}
+	if s, ok := ByID("ya"); !ok || s.Host != "ya.ru" {
+		t.Errorf("ByID(ya) = (%v, %v), want ya.ru", s, ok)
+	}
+}
+
 func TestIDForHost(t *testing.T) {
 	cases := []struct {
 		host   string

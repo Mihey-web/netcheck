@@ -38,6 +38,13 @@
         <!-- конфиг не прочитался: ненавязчивая строка, а не модалка -->
         <div id="cfg-err" class="cfg-err hidden"></div>
 
+        <!-- точечная проверка своего сайта (§3): валидация как у своих целей -->
+        <div class="single">
+            <input id="single-host" type="text" spellcheck="false" data-i18n-ph="single.ph"/>
+            <button class="sbtn" id="single-btn" data-i18n="single.btn">Проверить сайт</button>
+        </div>
+        <p class="single-err hidden" id="single-err"></p>
+
         <section class="pan">
             <h3><span data-i18n="panel.env">Окружение</span><span class="hx">ENV</span></h3>
             <div class="bd" id="env-body"></div>
@@ -58,13 +65,19 @@
         <section class="pan verdict">
             <h3><span data-i18n="panel.verdict">Вердикт</span><span class="hx" id="verdict-meta"></span></h3>
             <div class="chain" id="chain"></div>
-            <div class="tally" id="tally"></div>
             <div class="vtext" id="vtext"></div>
             <div id="vwarns"></div>
+            <!-- карточка точечной проверки — над списком сервисов -->
+            <div class="scard-wrap hidden" id="single-card"></div>
+            <!-- главный ответ: список сервисов со статусами (§2) -->
+            <div class="svclist" id="svclist"></div>
         </section>
 
-        <section class="pan report">
-            <h3><span data-i18n="panel.tests">Тесты</span><span class="hx" id="tests-meta"></span></h3>
+        <!-- таблица проб и tally живут в раскрывашке, закрытой по умолчанию -->
+        <section class="pan report collapsed" id="tech-pan">
+            <h3 id="tech-hd"><span data-i18n="tech.details">Технические детали</span>
+                <span class="hx" id="tests-meta"></span><span class="tcaret">▾</span></h3>
+            <div class="tally" id="tally"></div>
             <div class="bd">
                 <table>
                     <thead><tr>

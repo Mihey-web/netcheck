@@ -20,6 +20,7 @@ export namespace catalog {
 	    group: string;
 	    name: string;
 	    note: string;
+	    speedUrl?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Item(source);
@@ -32,6 +33,7 @@ export namespace catalog {
 	        this.group = source["group"];
 	        this.name = source["name"];
 	        this.note = source["note"];
+	        this.speedUrl = source["speedUrl"];
 	    }
 	}
 
@@ -427,6 +429,31 @@ export namespace history {
 
 }
 
+export namespace main {
+	
+	export class SpeedResult {
+	    serviceMbps: number;
+	    refMbps: number;
+	    proxyServiceMbps?: number;
+	    status: string;
+	    err?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SpeedResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.serviceMbps = source["serviceMbps"];
+	        this.refMbps = source["refMbps"];
+	        this.proxyServiceMbps = source["proxyServiceMbps"];
+	        this.status = source["status"];
+	        this.err = source["err"];
+	    }
+	}
+
+}
+
 export namespace probe {
 	
 	export class CertInfo {
@@ -597,6 +624,9 @@ export namespace verdict {
 	    proxyTried?: boolean;
 	    challenged?: boolean;
 	    cause: string;
+	    status?: string;
+	    advice?: string;
+	    reason?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ServiceVerdict(source);
@@ -610,12 +640,17 @@ export namespace verdict {
 	        this.proxyTried = source["proxyTried"];
 	        this.challenged = source["challenged"];
 	        this.cause = source["cause"];
+	        this.status = source["status"];
+	        this.advice = source["advice"];
+	        this.reason = source["reason"];
 	    }
 	}
 	export class Verdict {
 	    lines: string[];
 	    warnings: string[];
 	    chain: LayerStatus[];
+	    services?: ServiceVerdict[];
+	    vpnCoversBrowser: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Verdict(source);
@@ -626,6 +661,8 @@ export namespace verdict {
 	        this.lines = source["lines"];
 	        this.warnings = source["warnings"];
 	        this.chain = this.convertValues(source["chain"], LayerStatus);
+	        this.services = this.convertValues(source["services"], ServiceVerdict);
+	        this.vpnCoversBrowser = source["vpnCoversBrowser"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

@@ -31,6 +31,122 @@ type ServiceVerdict struct {
 	// как за «не работает».
 	Challenged bool          `json:"challenged,omitempty"`
 	Cause      analyze.Cause `json:"cause"`
+	// Status/Advice/Reason — коды статуса и совета плюс локализованная
+	// причина для выдачи на главном экране. Вычисляются в Build, чтобы
+	// фронт не дублировал логику; заполнены только в Verdict.Services —
+	// в Report.Services эти поля пустые.
+	Status string `json:"status,omitempty"`
+	Advice string `json:"advice,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// Коды статуса сервиса для главного экрана (ServiceVerdict.Status).
+// Статус отвечает на практический вопрос «откроется ли сайт у меня в браузере
+// прямо сейчас», а не на абстрактный «блокируют ли его»: владелец с включённым
+// VPN читал «только через VPN» как «не работает», хотя сайт у него открывался.
+const (
+	SvcOK = "ok" // работает напрямую
+	// напрямую заблокирован, но через VPN открылся, и браузер сейчас
+	// ходит через VPN — то есть для человека сайт работает
+	SvcOKViaVPN = "ok_via_vpn"
+	// заблокирован, через VPN открывается, но VPN сейчас браузер не покрывает
+	SvcNeedVPN   = "need_vpn"
+	SvcGeo       = "geo"       // сам сайт не пускает по стране
+	SvcChallenge = "challenge" // антибот/капча: в браузере скорее всего откроется
+	SvcDown      = "down"      // не работает нигде
+	SvcUnknown   = "unknown"   // не удалось определить
+)
+
+// Коды совета «что делать» (ServiceVerdict.Advice); текст — в i18n по этим же ключам.
+const (
+	AdviceVPN     = "advice.vpn"      // заблокировано провайдером — поможет VPN/обход DPI
+	AdviceVPNKeep = "advice.vpn_keep" // работает через ваш VPN — не выключайте его
+	AdviceVPNFail = "advice.vpn_fail" // не открылось ни напрямую, ни через VPN — дело в VPN-сервере
+	AdviceGeo     = "advice.geo"      // нужен VPN с выходом НЕ в РФ
+	AdviceBrowser = "advice.browser"  // капча: просто откройте в браузере
+	AdviceDNS     = "advice.dns"      // DNS-подмена: включите DoH / смените DNS
+	AdviceWait    = "advice.wait"     // сервис лежит сам — остаётся ждать
+	AdviceNone    = "advice.none"     // работает / сказать нечего
+)
+
+// causeOutcome — таблица Cause→(Status, Advice): единственное место истины
+// для кодов главного экрана. Уточнения по фактам замера (DirectOK, Challenged,
+// «через VPN пробовали и не вышло») живут в ServiceOutcome, но раскладка
+// по причинам — только здесь. Рядом с таблицей — табличный тест на каждый Cause.
+var causeOutcome = map[analyze.Cause]struct{ Status, Advice string }{
+	// режет провайдер — лечится VPN или обходом DPI
+	analyze.CauseDPI:      {SvcNeedVPN, AdviceVPN},
+	analyze.CauseIPBlock:  {SvcNeedVPN, AdviceVPN},
+	analyze.CauseStateful: {SvcNeedVPN, AdviceVPN},
+	analyze.CauseHTTPDrop: {SvcNeedVPN, AdviceVPN},
+	analyze.CauseStub:     {SvcNeedVPN, AdviceVPN},
+	analyze.CauseMITM:     {SvcNeedVPN, AdviceVPN},
+	// подмена DNS обходится и без VPN — сменой резолвера
+	analyze.CauseDNSSpoof: {SvcNeedVPN, AdviceDNS},
+	analyze.CauseGeoBlock: {SvcGeo, AdviceGeo},
+	analyze.CauseAntibot:  {SvcChallenge, AdviceBrowser},
+	analyze.CauseDown:     {SvcDown, AdviceWait},
+	// не открылось ни напрямую, ни через VPN: совет — про VPN-сервер,
+	// потому что именно он не справился (причина уже в Reason)
+	analyze.CauseProxyToo: {SvcDown, AdviceVPNFail},
+	// про имя ничего не доказано — честное «не удалось определить»
+	analyze.CauseNXDomain:  {SvcUnknown, AdviceNone},
+	analyze.CauseDNSSilent: {SvcUnknown, AdviceNone},
+	analyze.CauseUnknown:   {SvcUnknown, AdviceNone},
+}
+
+// ServiceOutcome — статус и совет по одному сервису. Экспортирована ради
+// табличного теста: он обязан покрыть каждый Cause из causeOutcome.
+// vpnCoversBrowser — «трафик браузера сейчас идёт через VPN» (см. одноимённую
+// функцию): без него нельзя ответить на практический вопрос статуса —
+// «откроется ли сайт у меня в браузере прямо сейчас».
+func ServiceOutcome(s ServiceVerdict, vpnCoversBrowser bool) (status, advice string) {
+	// Капча важнее причин: сервер ответил и в браузере сайт откроется,
+	// каким бы ни был диагноз по остальным уликам.
+	if s.Challenged {
+		return SvcChallenge, AdviceBrowser
+	}
+	if s.DirectOK {
+		return SvcOK, AdviceNone
+	}
+	o, ok := causeOutcome[s.Cause]
+	if !ok {
+		return SvcUnknown, AdviceNone // пустой Cause при провале
+	}
+	// «Через VPN да» — это замер, а не надежда: если через VPN пробовали
+	// и не вышло, сервис не работает нигде. Совет «поможет VPN» при этом
+	// врал бы — этот VPN как раз не помог, — поэтому совет меняется на
+	// «дело в VPN-сервере». Исключение — подмена DNS: она обходится сменой
+	// резолвера и без VPN, неудача VPN этот совет не отменяет.
+	if o.Status == SvcNeedVPN && s.ProxyTried && !s.ProxyOK {
+		if o.Advice == AdviceDNS {
+			return SvcDown, AdviceDNS
+		}
+		return SvcDown, AdviceVPNFail
+	}
+	// Через VPN открылся, и браузер сейчас ходит через VPN — значит, для
+	// человека сайт РАБОТАЕТ, и говорить «нужен VPN» ему нельзя: владелец
+	// с включённым VPN читал это как «не работает». Геоблок сюда тоже
+	// попадает: раз контрольный замер через VPN прошёл, выход оказался
+	// в подходящей стране.
+	if (o.Status == SvcNeedVPN || o.Status == SvcGeo) && s.ProxyOK && vpnCoversBrowser {
+		return SvcOKViaVPN, AdviceVPNKeep
+	}
+	return o.Status, o.Advice
+}
+
+// reasonID — ключ i18n с причиной по одному сервису; пусто — причины нет.
+func reasonID(s ServiceVerdict) string {
+	switch {
+	case s.Challenged:
+		return "svc.challenge"
+	case s.DirectOK || s.Cause == "":
+		return ""
+	case s.Cause == analyze.CauseProxyToo:
+		return "svc.proxy_fails"
+	default:
+		return "svc.blocked." + string(s.Cause)
+	}
 }
 
 // Итог контрольного HTTP-запроса, когда не открылся ни один сайт.
@@ -52,6 +168,17 @@ type Verdict struct {
 	Lines    []string      `json:"lines"`
 	Warnings []string      `json:"warnings"`
 	Chain    []LayerStatus `json:"chain"`
+	// Services — те же сервисы, что пришли в Input, но с кодами Status/Advice
+	// и локализованной причиной: готовая выдача для главного экрана.
+	// Успешные здесь тоже есть — список обязан быть полным ответом
+	// «что работает, а что нет», а не перечнем жалоб.
+	Services []ServiceVerdict `json:"services,omitempty"`
+	// VPNCoversBrowser — трафик браузера сейчас идёт через VPN. Фронт
+	// показывает по нему строку контекста («VPN применяется к браузеру» /
+	// «браузер идёт мимо VPN»); противоположный случай с текстом-предупреждением
+	// уже есть в Lines (warn.proxy_bypass) — флаг его не дублирует, а даёт
+	// машиночитаемый признак.
+	VPNCoversBrowser bool `json:"vpnCoversBrowser"`
 }
 
 // proxyIsInnocent — диагноз, который сам объясняет неудачу через VPN,
@@ -107,10 +234,49 @@ func viaVPN(s env.Snapshot) bool {
 	return s.DefaultViaTunnel || len(s.Tunnels) > 0 || s.Tailscale != "" || hasActiveProxy(s)
 }
 
+// vpnCoversBrowser — VPN применяется к трафику БРАУЗЕРА прямо сейчас.
+// Это не то же, что viaVPN («VPN вообще запущен»): прокси-листенер может
+// работать, пока браузер ходит мимо него. Браузер накрыт в двух случаях:
+// TUN-режим (дефолтный маршрут в туннеле — в нём весь трафик) или включённый
+// системный прокси Windows (WinINET, им пользуются браузеры), за адресом
+// которого действительно слушает прокси.
+func vpnCoversBrowser(s env.Snapshot) bool {
+	if s.DefaultViaTunnel {
+		return true
+	}
+	if !s.SystemProxyOn {
+		return false
+	}
+	// Сверяем порт системного прокси с найденными листенерами: включённый
+	// прокси с мёртвым адресом браузер не накрывает, а ломает. Если же ни
+	// одного листенера не нащупали (порт не из списка проверяемых), верим
+	// самому факту включённого прокси: доказать обратное нечем, а пугать
+	// «нужен VPN» человека с работающим браузером — исходная ошибка,
+	// которую эта функция и чинит.
+	sawListener := false
+	for _, p := range s.Proxies {
+		if p.Kind != "listener" || !p.Active {
+			continue
+		}
+		sawListener = true
+		// ProxyServer из реестра бывает и «127.0.0.1:10808», и со схемой,
+		// и в форме «http=127.0.0.1:10809;socks=127.0.0.1:10808» —
+		// поэтому ищем «:порт» листенера как подстроку, а не сравниваем целиком.
+		if i := strings.LastIndex(p.Addr, ":"); i >= 0 &&
+			strings.Contains(s.SystemProxyAddr, p.Addr[i:]) {
+			return true
+		}
+	}
+	return !sawListener
+}
+
 // Build — вердикт словами: первый сломанный слой, блокировки по механизмам,
 // работоспособность через VPN, предупреждения об окружении.
 func Build(l i18n.Lang, in Input) Verdict {
-	v := Verdict{Chain: in.Layers}
+	// Считается один раз на прогон: от этого флага зависят и статусы
+	// сервисов (ok_via_vpn против need_vpn), и строка контекста на фронте.
+	covers := vpnCoversBrowser(in.Env)
+	v := Verdict{Chain: in.Layers, VPNCoversBrowser: covers}
 
 	gw := layerStatus(in.Layers, "gateway")
 	dns := layerStatus(in.Layers, "dns")
@@ -266,6 +432,17 @@ func Build(l i18n.Lang, in Input) Verdict {
 	}
 	if len(challenged) > 0 {
 		v.Lines = append(v.Lines, i18n.T(l, "svc.challenge", strings.Join(challenged, ", ")))
+	}
+
+	// Выдача для главного экрана: каждый сервис получает код статуса, код
+	// совета и локализованную причину. Порядок — как в Input (порядок
+	// справочника); сортировку «сломанные сверху» делает интерфейс.
+	for _, s := range in.Services {
+		s.Status, s.Advice = ServiceOutcome(s, covers)
+		if id := reasonID(s); id != "" {
+			s.Reason = i18n.T(l, id, pretty(s.Host))
+		}
+		v.Services = append(v.Services, s)
 	}
 
 	v.Warnings = append(v.Warnings, envWarnings(l, in.Env)...)

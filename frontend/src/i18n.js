@@ -240,6 +240,97 @@ Object.assign(STR, {
   },
 });
 
+/* ── выдача по сервисам, свой сайт и замер скорости ── */
+Object.assign(STR, {
+  // короткие статусы строк выдачи (коды ServiceVerdict.Status).
+  // Статус отвечает на «откроется ли сайт в браузере прямо сейчас»:
+  // ok_via_vpn — зелёный (работает же), need_vpn — бывший vpn_only.
+  'st.ok':         {ru: 'работает', en: 'working'},
+  'st.ok_via_vpn': {ru: 'работает через ваш VPN', en: 'works through your VPN'},
+  'st.need_vpn':   {ru: 'нужен VPN', en: 'VPN required'},
+  'st.geo':      {ru: 'закрыт для вашей страны', en: 'blocked for your country'},
+  'st.challenge':{ru: 'проверка «я не робот»', en: '“not a robot” check'},
+  // «не открывается» нейтрально: «лежит у всех» vs «ни напрямую, ни через
+  // VPN» — это различие несёт совет (advice.wait / advice.vpn_fail)
+  'st.down':     {ru: 'не открывается', en: 'doesn\'t open'},
+  'st.unknown':  {ru: 'не удалось определить', en: 'could not determine'},
+
+  // строка контекста над списком (§2): применяется ли VPN к браузеру
+  'vpnctx.on':  {ru: 'Ваш VPN включён и применяется к браузеру',
+                 en: 'Your VPN is on and applies to the browser'},
+  'vpnctx.off': {ru: 'VPN запущен, но браузер идёт мимо него',
+                 en: 'A VPN is running, but the browser bypasses it'},
+
+  // советы «что делать» по кодам ServiceVerdict.Advice.
+  // Тексты согласованы со словарём бэкенда (internal/i18n/messages.go).
+  'advice.vpn': {
+    ru: 'Доступ ограничивает провайдер — поможет VPN или программа обхода блокировок.',
+    en: 'Access is restricted by your ISP — a VPN or an anti-censorship tool will help.',
+  },
+  'advice.vpn_keep': {
+    ru: 'Сейчас сайт открывается через ваш VPN. Чтобы он продолжал работать, не выключайте VPN.',
+    en: 'The site currently opens through your VPN. Keep the VPN on for it to stay working.',
+  },
+  'advice.vpn_fail': {
+    ru: 'Не открылось ни напрямую, ни через ваш VPN — похоже, дело в VPN-сервере. Попробуйте другой сервер или другую страну выхода в приложении VPN.',
+    en: 'It didn\'t open either directly or through your VPN — the VPN server looks like the culprit. Try another server or exit country in your VPN app.',
+  },
+  'advice.geo': {
+    ru: 'Сам сервис не пускает из вашей страны — нужен VPN с выходом в другой стране.',
+    en: 'The service itself refuses visitors from your country — you need a VPN exit in another country.',
+  },
+  'advice.browser': {
+    ru: 'Это проверка «я не робот», а не блокировка — просто откройте сайт в браузере.',
+    en: 'It\'s an “I am not a robot” check, not a block — just open the site in a browser.',
+  },
+  'advice.dns': {
+    ru: 'Подменяются DNS-ответы — включите защищённый DNS (DoH) в браузере или смените DNS-сервер в настройках сети.',
+    en: 'DNS answers are being spoofed — enable secure DNS (DoH) in your browser or change the DNS server in network settings.',
+  },
+  'advice.wait': {
+    ru: 'Сервис не работает сам по себе, у всех — остаётся подождать, пока его починят.',
+    en: 'The service is down on its own end, for everyone — all you can do is wait until it\'s fixed.',
+  },
+  'advice.none': {
+    ru: 'Работает — делать ничего не нужно.',
+    en: 'It works — nothing to do.',
+  },
+
+  // замер замедления (по кнопке); %s подставляются по порядку (fmt в main.js)
+  'speed.button':    {ru: 'Замерить скорость', en: 'Measure speed'},
+  'speed.measuring': {ru: 'Идёт замер…', en: 'Measuring…'},
+  'speed.dead': {
+    ru: 'Данные с серверов сервиса не идут вовсе, при этом канал качает %s Мбит/с.',
+    en: 'No data comes from the service servers at all, while the link pulls %s Mbit/s.',
+  },
+  'speed.slow': {
+    ru: 'Замедлен в ~%s раз: %s Мбит/с при эталоне %s.',
+    en: 'Throttled ~%s×: %s Mbit/s against a %s baseline.',
+  },
+  'speed.maybe_slow': {
+    ru: 'Похоже на замедление, но уверенности нет: %s Мбит/с при эталоне %s.',
+    en: 'Looks throttled, but it\'s not certain: %s Mbit/s against a %s baseline.',
+  },
+  'speed.normal': {
+    ru: 'Не замедлен: %s Мбит/с при эталоне %s.',
+    en: 'Not throttled: %s Mbit/s against a %s baseline.',
+  },
+  'speed.via_vpn': {ru: 'через VPN — %s Мбит/с', en: 'via VPN — %s Mbit/s'},
+  // замер не удался — это не «не замедлен»: честнее сказать, что ответа нет
+  'speed.error': {ru: 'Не удалось замерить скорость.', en: 'Couldn\'t measure the speed.'},
+
+  // раскрывашка с таблицей проб и точечная проверка своего сайта
+  'tech.details': {ru: 'Технические детали', en: 'Technical details'},
+  'single.ph':    {ru: 'проверить свой сайт, например example.com',
+                   en: 'check your own site, e.g. example.com'},
+  'single.btn':   {ru: 'Проверить сайт', en: 'Check site'},
+  'single.title': {ru: 'Ваш сайт', en: 'Your site'},
+  'single.running': {ru: 'Проверяю…', en: 'Checking…'},
+  'single.add':   {ru: 'Добавить в мой список', en: 'Add to my list'},
+  'single.busy':  {ru: 'Сейчас идёт другая проверка — дождитесь её окончания.',
+                   en: 'Another check is already running — wait for it to finish.'},
+});
+
 let lang = 'ru';
 
 export function getLang() { return lang; }

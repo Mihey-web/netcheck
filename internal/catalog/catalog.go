@@ -26,6 +26,28 @@ type Service struct {
 	NoteEN string `json:"noteEn"`
 }
 
+// RefSpeedURL — эталон скорости канала: тест Cloudflare, тот же файл, что
+// качает speed.cloudflare.com. Константа, а не сервис справочника: эталон
+// не проверяется на блокировку, он нужен только как точка отсчёта.
+const RefSpeedURL = "https://speed.cloudflare.com/__down?bytes=5242880"
+
+// SpeedURLYouTube — маркер «прямой ссылки заранее нет»: у YouTube URL
+// сегмента живёт минуты и добывается через Innertube непосредственно
+// перед замером.
+const SpeedURLYouTube = "youtube-innertube"
+
+// speedURLs — у кого из справочника есть замер скорости. Отдельная карта,
+// а не колонка в Service: позиционным литералам Services пришлось бы
+// дописывать пустое поле во все полсотни строк.
+var speedURLs = map[string]string{
+	"youtube": SpeedURLYouTube,
+}
+
+// SpeedURL — откуда качать при замере замедления сервиса. Пусто — замер
+// не предусмотрен; SpeedURLYouTube — URL добывается на месте через
+// Innertube (probe.YouTubeSpeedURL).
+func SpeedURL(id string) string { return speedURLs[id] }
+
 // Services — справочник. Порядок внутри группы = порядок в интерфейсе.
 // Колонки: ID, хост, группа, имя RU, имя EN, пояснение RU, пояснение EN.
 var Services = []Service{
@@ -97,6 +119,12 @@ var byID = func() map[string]Service {
 	return m
 }()
 
+// ByID — сервис по идентификатору справочника.
+func ByID(id string) (Service, bool) {
+	s, ok := byID[id]
+	return s, ok
+}
+
 // Item — запись справочника на одном языке: ровно то, что рисует интерфейс.
 type Item struct {
 	ID    string `json:"id"`
@@ -104,6 +132,8 @@ type Item struct {
 	Group string `json:"group"`
 	Name  string `json:"name"`
 	Note  string `json:"note"`
+	// SpeedURL — непустое значит «у сервиса есть кнопка замера скорости».
+	SpeedURL string `json:"speedUrl,omitempty"`
 }
 
 // Localized отдаёт справочник на выбранном языке ("en" — английский,
@@ -111,7 +141,7 @@ type Item struct {
 func Localized(lang string) []Item {
 	out := make([]Item, 0, len(Services))
 	for _, s := range Services {
-		it := Item{ID: s.ID, Host: s.Host, Group: s.Group, Name: s.Name, Note: s.Note}
+		it := Item{ID: s.ID, Host: s.Host, Group: s.Group, Name: s.Name, Note: s.Note, SpeedURL: SpeedURL(s.ID)}
 		if lang == "en" {
 			it.Name, it.Note = s.NameEN, s.NoteEN
 		}

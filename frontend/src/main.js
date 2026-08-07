@@ -1,6 +1,7 @@
 import './style.css';
 import {RunCheck, CancelCheck, GetHistory, GetRun, GetConfig, SaveConfig, CurrentLang, SetLang, Version,
   ListFonts, FontCSS, ApplyWindowScale, Catalog, Presets, SetServices,
+  RunSingle, MeasureSpeed,
   DeleteRuns, ClearHistory, SetTab as saveTab} from '../wailsjs/go/main/App';
 import {EventsOn} from '../wailsjs/runtime/runtime';
 import {t, pl, applyLang, getLang} from './i18n';
@@ -37,6 +38,11 @@ const state = {
   live: [],           // {layer, r}[]
   liveFor: '',        // какому прогону принадлежит live (startedAt)
   stick: true,        // держаться низа таблицы при добавлении строк
+  // ── выдача по сервисам ──
+  svcOpen: new Set(), // хосты раскрытых строк выдачи (живёт в сессии)
+  speed: {},          // id сервиса → {phase:'measuring'} | {phase:'done', res}
+  // точечная проверка своего сайта (§3)
+  single: {running: false, host: '', report: null, errKey: null, errText: null, added: false},
 };
 
 // group — состояние текущей группы строк в живой таблице: её слой, первая
@@ -255,7 +261,16 @@ function renderTally() {
   el.innerHTML = html;
 }
 
+// renderVerdict — вердикт целиком: текст, карточка «свой сайт» и список
+// сервисов. Текстовая часть вынесена отдельно, чтобы ранние выходы
+// (идёт прогон / ошибка / пусто) не пропускали список и карточку.
 function renderVerdict() {
+  renderVerdictText();
+  renderSingleCard();
+  renderSvcList();
+}
+
+function renderVerdictText() {
   renderTally();
   const meta = $('verdict-meta');
   const vt = $('vtext');
@@ -282,11 +297,183 @@ function renderVerdict() {
   }
   meta.textContent = fmtWhen(rep.startedAt) + ' · ' + fmtDur(rep.duration);
   const lines = (rep.verdict && rep.verdict.lines) || [];
-  vt.innerHTML = lines.length
-    ? lines.map(l => `<p>${esc(l)}</p>`).join('')
-    : `<p class="dim">—</p>`;
+  // Когда есть список сервисов, сводная строка — заголовок над ним,
+  // остальные строки — мелче. Старый отчёт без services рендерится как раньше.
+  const hasSvc = !!(rep.verdict && rep.verdict.services && rep.verdict.services.length);
+  vt.innerHTML = !lines.length
+    ? `<p class="dim">—</p>`
+    : hasSvc
+      ? `<p class="vhead">${esc(lines[0])}</p>` +
+        lines.slice(1).map(l => `<p class="vrest">${esc(l)}</p>`).join('')
+      : lines.map(l => `<p>${esc(l)}</p>`).join('');
   const warns = (rep.verdict && rep.verdict.warnings) || [];
   vw.innerHTML = warns.map(w => `<div class="vnote">⚠ ${esc(w)}</div>`).join('');
+}
+
+/* ──────────────── выдача по сервисам (§2) ──────────────── */
+
+// порядок показа: сломанные сверху, работающие в конце
+// сломанные сверху, работающие — вниз: «работает через VPN» для человека
+// такой же рабочий сервис, как и открывающийся напрямую
+const ST_ORDER = {down: 0, need_vpn: 1, geo: 2, challenge: 3, unknown: 4, ok_via_vpn: 5, ok: 6};
+
+// сервис из справочника по хосту: там живут имя и speedUrl
+const catBy = host => state.catalog.find(s => s.host === host);
+
+// fmt — подстановка аргументов в строку словаря по местам %s (по порядку)
+const fmt = (key, ...args) => args.reduce((s, a) => s.replace('%s', a), t(key));
+
+// Мбит/с: один знак после запятой, локале-нейтрально (точка)
+const fmtMbps = v => (v == null || !isFinite(v)) ? '—' : Number(v).toFixed(1);
+
+// speedResultHTML — итог замера в строке сервиса; err — только в title
+function speedResultHTML(res) {
+  if (!res || res.status === 'error') {
+    return `<span class="sres bad" title="${esc((res && res.err) || '')}">${esc(t('speed.error'))}</span>`;
+  }
+  let txt, cls;
+  if (res.status === 'slow' && !(res.serviceMbps > 0)) {
+    // Ноль — не «нет данных», а самый сильный из возможных результатов:
+    // канал качает, а с CDN сервиса не приходит ничего.
+    txt = fmt('speed.dead', fmtMbps(res.refMbps));
+    cls = 'bad';
+  } else if (res.status === 'slow') {
+    txt = fmt('speed.slow', String(Math.round(res.refMbps / res.serviceMbps)),
+      fmtMbps(res.serviceMbps), fmtMbps(res.refMbps));
+    cls = 'bad';
+  } else if (res.status === 'maybe_slow') {
+    txt = fmt('speed.maybe_slow', fmtMbps(res.serviceMbps), fmtMbps(res.refMbps));
+    cls = 'warn';
+  } else {
+    txt = fmt('speed.normal', fmtMbps(res.serviceMbps), fmtMbps(res.refMbps));
+    cls = 'good';
+  }
+  if (res.proxyServiceMbps) txt += ' ' + fmt('speed.via_vpn', fmtMbps(res.proxyServiceMbps));
+  return `<span class="sres ${cls}">${esc(txt)}</span>`;
+}
+
+// speedSlotHTML — содержимое блока замера: кнопка / «идёт замер…» / результат
+function speedSlotHTML(id) {
+  const sp = state.speed[id];
+  if (sp && sp.phase === 'measuring') {
+    return `<span class="smeasuring">${esc(t('speed.measuring'))}</span>`;
+  }
+  return `<button class="smeasure" data-id="${esc(id)}">${esc(t('speed.button'))}</button>` +
+    (sp && sp.res ? speedResultHTML(sp.res) : '');
+}
+
+// refreshSpeedSlots — обновить все места, где виден замер этого сервиса
+// (строка списка и карточка «свой сайт»), не пересобирая список: пересборка
+// сбросила бы прокрутку и раскрытые строки под руками у человека.
+function refreshSpeedSlots(id) {
+  document.querySelectorAll(`.sspeed[data-id="${CSS.escape(id)}"]`)
+    .forEach(el => { el.innerHTML = speedSlotHTML(id); });
+}
+
+// measureSpeed — замер по кнопке (§4). Результат живёт в сессии.
+async function measureSpeed(id) {
+  if (!id || (state.speed[id] && state.speed[id].phase === 'measuring')) return;
+  state.speed[id] = {phase: 'measuring'};
+  refreshSpeedSlots(id);
+  let res;
+  try {
+    res = await MeasureSpeed(id);
+  } catch (e) {
+    console.error(e);
+    res = {status: 'error', err: (e && e.message) ? e.message : String(e)};
+  }
+  state.speed[id] = {phase: 'done', res};
+  refreshSpeedSlots(id);
+}
+
+// svcProbesHTML — пробы самого сервиса в раскрытой строке: тот же материал,
+// что в общей таблице «Технические детали», но отфильтрованный по хосту и
+// компактно: метод, статус, деталь, время. Прямые пробы и пробы через VPN
+// разведены подписями, когда есть и те и другие.
+function svcProbesHTML(host, rep) {
+  const all = ((rep && rep.results) || []).filter(r => hostOf(r.target) === host);
+  if (!all.length) return '';
+  const direct = all.filter(r => r.path !== 'proxy');
+  const proxy = all.filter(r => r.path === 'proxy');
+  const row = r => {
+    const stc = stCell(r.status);
+    const why = esc(probeWhy(r));
+    return `<tr><td class="pm">${esc(r.method)}</td>` +
+      `<td class="pst"><span class="st ${stc}">${stc.toUpperCase()}</span></td>` +
+      // title дублирует деталь целиком — как в общей таблице, ellipsis прячет суть
+      `<td class="pwhy"${why ? ` title="${why}"` : ''}>${why}</td>` +
+      `<td class="pms">${fmtDur(r.latency)}</td></tr>`;
+  };
+  // подписи «напрямую/через VPN» нужны, только когда есть оба вида проб
+  const section = (rows, key) => !rows.length ? '' :
+    (proxy.length ? `<tr class="pgrp"><td colspan="4">${esc(t(key))}</td></tr>` : '') +
+    rows.map(row).join('');
+  return `<div class="sprobes"><table>` +
+    section(direct, 'tally.direct') + section(proxy, 'tally.via_vpn') +
+    `</table></div>`;
+}
+
+// svcRowHTML — одна строка выдачи: значок статуса, имя, короткий статус;
+// раскрытая часть — причина, совет, пробы сервиса и замер скорости.
+// opts.open — раскрыта сразу, opts.add — с кнопкой «добавить в мой список»,
+// opts.report — откуда брать пробы (карточка своего сайта живёт не в state.report).
+function svcRowHTML(s, opts = {}) {
+  const st = s.status || 'unknown';
+  const it = catBy(s.host);
+  const name = (it && it.name) || s.host;
+  const open = opts.open || state.svcOpen.has(s.host);
+  // Замер скорости осмыслен только там, где сервис открывается напрямую:
+  // это и есть вопрос «не душат ли меня». Если напрямую он не открывается
+  // вовсе, мерить нечего — там и так ноль, и цифра лишь запутала бы.
+  const spid = (it && it.speedUrl && st === 'ok') ? it.id : null;
+  let detail = '';
+  if (s.reason) detail += `<p class="sreason">${esc(s.reason)}</p>`;
+  if (s.advice) detail += `<p class="sadvice">${esc(t(s.advice))}</p>`;
+  detail += svcProbesHTML(s.host, opts.report || state.report);
+  if (spid) detail += `<div class="sspeed" data-id="${esc(spid)}">${speedSlotHTML(spid)}</div>`;
+  if (opts.add) detail += `<button class="sadd">${esc(t('single.add'))}</button>`;
+  return `<div class="srow s-${esc(st)}${open ? ' open' : ''}" data-host="${esc(s.host)}">` +
+    `<div class="shead"><i class="sic"></i>` +
+    `<span class="sname">${esc(name)}</span>` +
+    (name !== s.host ? `<span class="shost">${esc(s.host)}</span>` : '') +
+    `<span class="sst">${esc(t('st.' + st))}</span>` +
+    `<span class="scaret">${open ? '▴' : '▾'}</span></div>` +
+    `<div class="sdetail${open ? '' : ' hidden'}">${detail}</div></div>`;
+}
+
+// toggleSvcRow — раскрыть/свернуть строку прямо в DOM: пересборка списка
+// ради одного клика сбрасывала бы прокрутку. Набор открытых хостов
+// запоминается, чтобы пережить перерисовку.
+function toggleSvcRow(row) {
+  const open = !row.classList.contains('open');
+  row.classList.toggle('open', open);
+  row.querySelector('.sdetail').classList.toggle('hidden', !open);
+  const c = row.querySelector('.scaret');
+  if (c) c.textContent = open ? '▴' : '▾';
+  if (open) state.svcOpen.add(row.dataset.host);
+  else state.svcOpen.delete(row.dataset.host);
+}
+
+function renderSvcList() {
+  const el = $('svclist');
+  const rep = state.report;
+  const svcs = (!state.running && !state.error && rep && rep.verdict && rep.verdict.services) || [];
+  if (!svcs.length) { el.innerHTML = ''; return; } // фолбэк: старый отчёт без services
+  // сортировка стабильная: внутри одного статуса — порядок справочника
+  const rows = [...svcs].sort((a, b) =>
+    (ST_ORDER[a.status] ?? 9) - (ST_ORDER[b.status] ?? 9));
+  // Строка контекста: без неё список читается двусмысленно — «работает
+  // через VPN» непонятно, работает ли ПРЯМО СЕЙЧАС. Показываем только
+  // когда VPN вообще есть: иначе это шум.
+  const v = rep.verdict;
+  const hasVPN = v.vpnCoversBrowser ||
+    (rep.env && ((rep.env.proxies && rep.env.proxies.length) ||
+      (rep.env.tunnels && rep.env.tunnels.length) || rep.env.defaultViaTunnel));
+  const ctx = hasVPN
+    ? `<p class="svcctx ${v.vpnCoversBrowser ? 'on' : 'off'}">` +
+      esc(t(v.vpnCoversBrowser ? 'vpnctx.on' : 'vpnctx.off')) + '</p>'
+    : '';
+  el.innerHTML = ctx + rows.map(s => svcRowHTML(s)).join('');
 }
 
 // worseOf — худший из двух статусов; им красится вся группа слоя.
@@ -295,6 +482,15 @@ const worseOf = (a, b) =>
 
 const layerName = l => l === 'blocked' ? t('tlayer.blocked') : t('layer.' + l);
 
+// probeWhy — деталь пробы для колонки результата: текст ошибки, иначе
+// полученные адреса. Общая для большой таблицы и проб в строке сервиса —
+// один источник правды на оба места.
+function probeWhy(r) {
+  if (r.detail) return r.detail;
+  if (r.ips && r.ips.length) return r.ips.join(', ');
+  return '';
+}
+
 // rowHTML — одна строка результата без подписи слоя: подпись живёт
 // на первой строке группы и проставляется отдельно.
 function rowHTML(r) {
@@ -302,9 +498,7 @@ function rowHTML(r) {
   const isProxy = r.path === 'proxy';
   const pathTxt = esc(isProxy ? t('path.proxy') : t('path.direct'));
   const stc = stCell(r.status);
-  let why = '';
-  if (r.detail) why = esc(r.detail);
-  else if (r.ips && r.ips.length) why = esc(r.ips.join(', '));
+  const why = esc(probeWhy(r));
   return `<td class="layer"></td>` +
     `<td class="tgt">${tgt}</td>` +
     `<td class="mth">${esc(r.method)}</td>` +
@@ -503,7 +697,12 @@ function updateButton() {
   const btn = $('btn-run');
   // Во время прогона кнопка живёт: она превращается в «Отменить».
   // Гаснет она только после нажатия отмены — второй раз отменять нечего.
-  btn.disabled = state.canceling;
+  // Во время точечной проверки бэкенд занят — общий прогон не стартует,
+  // и делать вид кнопкой, что стартует, не надо.
+  btn.disabled = state.canceling || state.single.running;
+  // поле «свой сайт» заблокировано на время общего прогона (и наоборот)
+  $('single-host').disabled = state.running;
+  $('single-btn').disabled = state.running || state.single.running;
   btn.classList.toggle('cancel', state.running);
   // Настройки посреди прогона меняют язык и перечитывают конфиг, а это
   // ломает состояние живой таблицы: половина строк остаётся на прежнем
@@ -854,6 +1053,9 @@ function resetRunUI() {
   state.canceling = false;
   state.progress = null;
   state.collecting = true;
+  // карточка «свой сайт» — ответ про прошлую картину сети, новый прогон её снимает
+  state.single = {running: false, host: state.single.host,
+    report: null, errKey: null, errText: null, added: false};
   group = {layer: null, tr: null, worst: 'ok'};
 
   clearTable(t('table.running'));
@@ -912,6 +1114,109 @@ function cancelRun() {
   state.canceling = true;
   updateButton();
   CancelCheck().catch(e => console.error(e));
+}
+
+/* ──────────────── свой сайт (§3) ──────────────── */
+
+// showSingleErr — ошибка под полем «проверить свой сайт»; null прячет её
+function showSingleErr(key) {
+  const el = $('single-err');
+  el.textContent = key ? t(key) : '';
+  el.classList.toggle('hidden', !key);
+}
+
+// hostInList — хост уже в «моём списке»: отмечен в справочнике или своя цель
+function hostInList(host) {
+  const known = catBy(host);
+  if (known && state.picked.has(known.id)) return true;
+  return state.custom.some(c => c.host === host);
+}
+
+function renderSingleCard() {
+  const el = $('single-card');
+  const sg = state.single;
+  let h = '';
+  if (sg.running) {
+    h = `<div class="scard"><h4>${esc(t('single.title'))}</h4>` +
+      `<p class="sdim">${esc(t('single.running'))} ${esc(sg.host)}</p></div>`;
+  } else if (sg.errKey) {
+    h = `<div class="scard"><h4>${esc(t('single.title'))}</h4>` +
+      `<p class="swarn">${esc(t(sg.errKey))}</p></div>`;
+  } else if (sg.errText) {
+    h = `<div class="scard"><h4>${esc(t('single.title'))}</h4>` +
+      `<p class="serr">${esc(t('err.run'))}: ${esc(sg.errText)}</p></div>`;
+  } else if (sg.report) {
+    const svcs = (sg.report.verdict && sg.report.verdict.services) || [];
+    const s = svcs.find(x => x.host === sg.host);
+    // строка своего сайта раскрыта сразу — ответ и есть смысл карточки;
+    // пробы берутся из её собственного отчёта, а не из общего прогона
+    const body = s
+      ? svcRowHTML(s, {open: true, add: !hostInList(sg.host) && !sg.added, report: sg.report})
+      : `<p class="sdim">${esc(((sg.report.verdict || {}).lines || [])[0] || '—')}</p>`;
+    h = `<div class="scard"><h4>${esc(t('single.title'))}</h4>${body}</div>`;
+  }
+  el.innerHTML = h;
+  el.classList.toggle('hidden', !h);
+}
+
+// finishSingle — единый финал точечной проверки: зовётся из промиса
+// RunSingle и из события single-done; кто первый успел — тот и закрыл.
+function finishSingle(rep, errText) {
+  if (!state.single.running) return;
+  state.single.running = false;
+  if (errText) state.single.errText = errText;
+  else state.single.report = rep || null;
+  renderSingleCard();
+  updateButton();
+}
+
+async function runSingle() {
+  if (state.running || state.single.running) return;
+  const raw = $('single-host').value.trim()
+    .replace(/^[a-z+.-]+:\/\//i, '').replace(/\/.*$/, '');
+  if (!raw) return;
+  // та же валидация, что у своих целей: молча глотать опечатку — значит врать
+  if (!hostOk(raw)) {
+    showSingleErr(/[^\x00-\x7f]/.test(raw) ? 'svc.err.idn' : 'svc.err.host');
+    return;
+  }
+  showSingleErr(null);
+  state.single = {running: true, host: raw, report: null, errKey: null, errText: null, added: false};
+  renderSingleCard();
+  updateButton();
+  let rep = null;
+  try {
+    rep = await RunSingle(raw);
+  } catch (e) {
+    console.error(e);
+    finishSingle(null, (e && e.message) ? e.message : String(e));
+    return;
+  }
+  // Пустой Report с нулевым временем — бэкенд занят другим прогоном:
+  // наш single не стартовал, итога не будет (событие run-busy говорит то же).
+  if (isBusyStub(rep)) {
+    if (state.single.running) {
+      state.single.running = false;
+      state.single.errKey = 'single.busy';
+      renderSingleCard();
+      updateButton();
+    }
+    return;
+  }
+  finishSingle(rep);
+}
+
+// addSingleToList — «добавить в мой список»: тот же механизм, что у своих
+// целей на вкладке «Сервисы» (известный хост — галочка, новый — custom).
+async function addSingleToList() {
+  const raw = state.single.host;
+  if (!raw) return;
+  const known = catBy(raw);
+  if (known) state.picked.add(known.id);
+  else if (!state.custom.some(c => c.host === raw)) state.custom.push({host: raw, group: 'blocked'});
+  state.single.added = true;
+  await persistAndRender(); // сохраняет выбор; при ошибке откатит его к конфигу
+  renderSingleCard();       // кнопка «добавить» исчезает
 }
 
 /* ──────────────── настройки ──────────────── */
@@ -1043,6 +1348,16 @@ async function init() {
   // Финал прогона, промис которого потерян перезагрузкой страницы:
   // без этого события такой фронт не дожил бы до отчёта.
   EventsOn('done', rep => { finishRun(rep); });
+  // тот же механизм для точечной проверки (итог приходит НЕ событием done)
+  EventsOn('single-done', rep => { finishSingle(rep); });
+  // бэкенд занят другим прогоном — точечная проверка не стартовала
+  EventsOn('run-busy', () => {
+    if (!state.single.running) return;
+    state.single.running = false;
+    state.single.errKey = 'single.busy';
+    renderSingleCard();
+    updateButton();
+  });
   EventsOn('progress', p => {
     if (!p || !p.layer) return;
     // тик счётчика целей — только цифры на кнопке, в таблицу ему нечего
@@ -1088,6 +1403,37 @@ async function init() {
   $('btn-run').addEventListener('click', () => {
     if (state.running) cancelRun();
     else run();
+  });
+
+  // точечная проверка своего сайта
+  $('single-btn').addEventListener('click', runSingle);
+  $('single-host').addEventListener('keydown', e => {
+    if (e.key === 'Enter') runSingle();
+  });
+  // человек начал править адрес — старая ошибка больше не про этот ввод
+  $('single-host').addEventListener('input', () => showSingleErr(null));
+
+  // выдача по сервисам: раскрытие строк, замер скорости, «добавить в список».
+  // Один делегированный слушатель на контейнер — строки пересобираются целиком.
+  for (const cid of ['svclist', 'single-card']) {
+    $(cid).addEventListener('click', e => {
+      const mb = e.target.closest('.smeasure');
+      if (mb) { measureSpeed(mb.dataset.id); return; }
+      if (e.target.closest('.sadd')) { addSingleToList().catch(err => console.error(err)); return; }
+      const hd = e.target.closest('.shead');
+      if (hd) toggleSvcRow(hd.closest('.srow'));
+    });
+  }
+
+  // раскрывашка «Технические детали»: состояние живёт в сессии,
+  // в конфиг сознательно не пишется (упрощение против спеки — так решено)
+  let techOpen = false;
+  $('tech-hd').addEventListener('click', () => {
+    techOpen = !techOpen;
+    $('tech-pan').classList.toggle('collapsed', !techOpen);
+    $('tech-pan').querySelector('.tcaret').textContent = techOpen ? '▴' : '▾';
+    // пока раскрывашка была закрыта, прокрутка таблицы стояла в нуле
+    if (techOpen) requestAnimationFrame(stickBottom);
   });
 
   // автопрокрутка живой таблицы держится, пока человек не отлистал вверх

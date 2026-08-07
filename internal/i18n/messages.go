@@ -202,6 +202,78 @@ var messages = map[string]map[Lang]string{
 		EN: "down",
 	},
 
+	// советы «что делать» по кодам ServiceVerdict.Advice. Ключ совпадает
+	// с кодом: фронт получает код и берёт текст по нему же.
+	"advice.vpn": {
+		RU: "Доступ ограничивает провайдер — поможет VPN или программа обхода блокировок.",
+		EN: "Access is restricted by your ISP — a VPN or an anti-censorship tool will help.",
+	},
+	// Статус ok_via_vpn: сайт сейчас работает, потому что браузер идёт через
+	// VPN. Совет — не «включите VPN» (он включён), а «не выключайте».
+	"advice.vpn_keep": {
+		RU: "Сейчас сайт открывается через ваш VPN. Чтобы он продолжал работать, не выключайте VPN.",
+		EN: "The site currently opens through your VPN. Keep the VPN on for it to stay working.",
+	},
+	// «Не открылось ни напрямую, ни через VPN» — прежнее «сервис лежит»
+	// читалось как «не работает ни у кого», хотя дело в VPN-сервере.
+	"advice.vpn_fail": {
+		RU: "Не открылось ни напрямую, ни через ваш VPN — похоже, дело в VPN-сервере. Попробуйте другой сервер или другую страну выхода в приложении VPN.",
+		EN: "It didn't open either directly or through your VPN — the VPN server looks like the culprit. Try another server or exit country in your VPN app.",
+	},
+	"advice.geo": {
+		RU: "Сам сервис не пускает из вашей страны — нужен VPN с выходом в другой стране.",
+		EN: "The service itself refuses visitors from your country — you need a VPN exit in another country.",
+	},
+	"advice.browser": {
+		RU: "Это проверка «я не робот», а не блокировка — просто откройте сайт в браузере.",
+		EN: "It's an “I am not a robot” check, not a block — just open the site in a browser.",
+	},
+	"advice.dns": {
+		RU: "Подменяются DNS-ответы — включите защищённый DNS (DoH) в браузере или смените DNS-сервер в настройках сети.",
+		EN: "DNS answers are being spoofed — enable secure DNS (DoH) in your browser or change the DNS server in network settings.",
+	},
+	"advice.wait": {
+		RU: "Сервис не работает сам по себе, у всех — остаётся подождать, пока его починят.",
+		EN: "The service is down on its own end, for everyone — all you can do is wait until it's fixed.",
+	},
+	"advice.none": {
+		RU: "Работает — делать ничего не нужно.",
+		EN: "It works — nothing to do.",
+	},
+
+	// замер замедления (§4): кнопка, статусы и честное «не удалось».
+	// Числа фронт подставляет уже отформатированными строками, поэтому %s.
+	"speed.button": {
+		RU: "Замерить скорость",
+		EN: "Measure speed",
+	},
+	"speed.measuring": {
+		RU: "Идёт замер…",
+		EN: "Measuring…",
+	},
+	"speed.slow": {
+		RU: "Замедлен в ~%s раз: %s Мбит/с при эталоне %s.",
+		EN: "Throttled ~%s×: %s Mbit/s against a %s baseline.",
+	},
+	"speed.maybe_slow": {
+		RU: "Похоже на замедление, но уверенности нет: %s Мбит/с при эталоне %s.",
+		EN: "Looks throttled, but it's not certain: %s Mbit/s against a %s baseline.",
+	},
+	"speed.normal": {
+		RU: "Не замедлен: %s Мбит/с при эталоне %s.",
+		EN: "Not throttled: %s Mbit/s against a %s baseline.",
+	},
+	// приписка к замеру, когда мерили и через VPN
+	"speed.via_vpn": {
+		RU: "через VPN — %s Мбит/с",
+		EN: "via VPN — %s Mbit/s",
+	},
+	// Замер не удался — это не «не замедлен»: честнее сказать, что ответа нет.
+	"speed.error": {
+		RU: "Не удалось замерить скорость.",
+		EN: "Couldn't measure the speed.",
+	},
+
 	// предупреждения об окружении
 	"warn.proxy_bypass": {
 		RU: "Внимание: VPN-прокси запущен, но системный прокси выключен — браузер ходит мимо VPN.",

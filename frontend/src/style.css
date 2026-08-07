@@ -151,7 +151,8 @@ main{flex:1 1 auto;min-height:0;display:grid;gap:10px;padding:10px 12px 12px;
 .hist-err{flex:none;padding:4px 7px 3px;font-family:var(--mono);font-size:10px;color:var(--crit)}
 
 /* ——— вердикт ——— */
-.verdict{flex:none}
+/* теперь это главная панель: внутри живёт список сервисов со своей прокруткой */
+.verdict{flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
 .chain{display:flex;align-items:center;gap:0;padding:9px 11px 7px;flex-wrap:wrap;row-gap:5px}
 .chip{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;
  letter-spacing:.06em;padding:3px 9px;border:1px solid var(--line-2);color:var(--ink-2);
@@ -208,8 +209,10 @@ main{flex:1 1 auto;min-height:0;display:grid;gap:10px;padding:10px 12px 12px;
 .svc:hover{background:rgba(255,255,255,.03);border-color:var(--line-2)}
 .svc.on{background:rgba(95,217,245,.06);border-color:rgba(95,217,245,.22)}
 .svc input{accent-color:var(--hud);flex:none;margin:0}
-/* имя не режем никогда — по нему сервис и узнают; ужимаются адрес и пояснение */
-.svc .n{flex:none;color:var(--ink);white-space:nowrap}
+/* имя не режем никогда — по нему сервис и узнают; ужимаются адрес и пояснение.
+   Размер задаём явно: без него имя наследовало браузерные 16px и было
+   вдвое крупнее всего вокруг. */
+.svc .n{flex:none;color:var(--ink);white-space:nowrap;font-size:11px}
 .svc .h{flex:0 1 auto;min-width:0;color:var(--ink-2);font-size:10px;
  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .svc .q{flex:0 1 auto;min-width:0;color:var(--hud-dim);font-size:9px;margin-left:auto;
@@ -414,3 +417,105 @@ main.hidden{display:none}
 .map-legend .lpin.vpn{border-color:var(--hud);box-shadow:0 0 5px rgba(95,217,245,.7)}
 .map-note{margin:6px 0 0;font-size:10.5px;line-height:1.45;color:var(--muted);max-width:900px}
 .map-note.quiet{font-family:var(--mono);font-size:10px;letter-spacing:.03em}
+
+/* ═══ выдача по сервисам (§2) ═══ */
+.vtext .vhead{font-size:13.5px;color:var(--ink)}
+.vtext .vrest{font-size:11px;color:var(--ink-2)}
+.svclist{flex:1 1 auto;min-height:0;overflow:auto;scrollbar-width:thin;
+ scrollbar-color:#22384a transparent;padding:2px 11px 10px;
+ display:flex;flex-direction:column;gap:2px}
+.svclist:empty{padding:0}
+.srow{flex:none;border:1px solid var(--line);background:rgba(255,255,255,.02)}
+.srow .shead{display:flex;align-items:center;gap:8px;padding:5px 9px 4px;cursor:pointer;
+ font-family:var(--mono);font-size:11px;min-width:0}
+.srow .shead:hover{background:rgba(95,217,245,.06)}
+/* строка контекста над списком: в каком режиме читать статусы */
+.svcctx{margin:0 0 6px;font-size:10px;letter-spacing:.03em}
+.svcctx.on{color:var(--good)}
+.svcctx.off{color:var(--serious)}
+/* значки статусов — цветные точки CSS, никаких эмодзи-шрифтов */
+.sic{width:8px;height:8px;flex:none;border-radius:50%;background:var(--muted)}
+.s-ok>.shead .sic{background:var(--good);box-shadow:0 0 6px rgba(58,214,132,.6)}
+/* работает через VPN — тоже зелёный: для человека сервис РАБОТАЕТ.
+   Кольцо отличает его от «работает напрямую», но тревоги не добавляет. */
+.s-ok_via_vpn>.shead .sic{background:var(--good);box-shadow:0 0 0 2px rgba(58,214,132,.28)}
+.s-need_vpn>.shead .sic{background:var(--serious);box-shadow:0 0 6px rgba(255,138,76,.65)}
+.s-down>.shead .sic{background:var(--crit);box-shadow:0 0 7px rgba(255,77,94,.7)}
+.s-geo>.shead .sic{background:var(--warn);box-shadow:0 0 6px rgba(255,194,51,.6)}
+/* антибот — не совсем поломка: тот же жёлтый, но ромбом */
+.s-challenge>.shead .sic{background:rgba(255,194,51,.25);border:1.5px solid var(--warn);
+ border-radius:1px;transform:rotate(45deg)}
+.s-unknown>.shead .sic{background:transparent;border:1.5px solid var(--muted)}
+.sname{color:var(--ink);white-space:nowrap;flex:none}
+.shost{color:var(--ink-3);font-size:9.5px;min-width:0;overflow:hidden;
+ text-overflow:ellipsis;white-space:nowrap}
+.sst{margin-left:auto;flex:none;color:var(--ink-2);font-size:10px;white-space:nowrap}
+.s-ok>.shead .sst,.s-ok_via_vpn>.shead .sst{color:var(--good)}
+.s-need_vpn>.shead .sst{color:var(--serious)}
+.s-down>.shead .sst{color:var(--crit)}
+.s-geo>.shead .sst,.s-challenge>.shead .sst{color:var(--warn)}
+.s-unknown>.shead .sst{color:var(--muted)}
+.scaret{flex:none;color:var(--hud-dim);font-family:var(--mono);font-size:9px}
+.sdetail{padding:2px 10px 8px;border-top:1px dashed rgba(255,255,255,.06);
+ font-size:11px;line-height:1.45;user-select:text}
+.sreason{margin:5px 0 0;color:var(--ink-2)}
+.sadvice{margin:4px 0 0;color:var(--hud)}
+/* пробы сервиса в раскрытой строке: та же моно-фактура, что общая таблица,
+   но плотнее — метод, статус, деталь, время; без шапки-простыни */
+.sprobes{margin-top:6px;overflow-x:auto}
+.sprobes table{font-size:10px}
+.sprobes td{padding:2px 8px 1.5px 0;border-bottom:none}
+.sprobes .pgrp td{padding-top:5px;font-family:var(--hudfont);font-size:8.5px;
+ letter-spacing:.14em;text-transform:uppercase;color:var(--hud-dim)}
+.sprobes td.pm{color:var(--ink-2);width:74px}
+.sprobes td.pwhy{width:60%;max-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--ink-2)}
+.sprobes td.pms{text-align:right;width:56px;padding-right:0;color:var(--ink-2)}
+/* замер скорости (§4) */
+.sspeed{margin-top:7px;display:flex;align-items:center;gap:9px;flex-wrap:wrap;
+ font-family:var(--mono);font-size:10.5px}
+.smeasure,.sadd{appearance:none;background:none;border:1px solid var(--hud-dim);color:var(--hud);
+ font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;
+ padding:3px 9px 2px;cursor:pointer}
+.smeasure:hover,.sadd:hover{background:rgba(95,217,245,.08);border-color:var(--hud)}
+.sadd{margin-top:7px}
+.smeasuring{color:var(--hud);font-size:10px;letter-spacing:.06em;
+ animation:measPulse 1s ease-in-out infinite alternate}
+@keyframes measPulse{from{opacity:.35}to{opacity:1}}
+.sres.bad{color:var(--crit)}
+.sres.warn{color:var(--warn)}
+.sres.good{color:var(--good)}
+
+/* ═══ карточка «свой сайт» (§3) ═══ */
+.scard-wrap{flex:none;margin:0 11px 8px}
+.scard-wrap.hidden{display:none}
+.scard{border:1px solid var(--hud-dim);background:rgba(95,217,245,.05);padding:7px 9px 9px;
+ clip-path:polygon(0 0,calc(100% - 8px) 0,100% 8px,100% 100%,8px 100%,0 calc(100% - 8px))}
+.scard h4{margin:0 0 6px;font-family:var(--hudfont);font-weight:400;font-size:10px;
+ letter-spacing:.16em;text-transform:uppercase;color:var(--hud)}
+.scard .srow{border-color:var(--line-2)}
+.scard .sdim{margin:0;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+.scard .swarn{margin:0;font-family:var(--mono);font-size:10.5px;color:var(--warn)}
+.scard .serr{margin:0;font-family:var(--mono);font-size:10.5px;color:var(--crit);user-select:text}
+
+/* поле «проверить свой сайт» рядом с главной кнопкой */
+.single{display:flex;gap:7px;flex:none}
+.single input{flex:1;min-width:0;background:rgba(255,255,255,.03);border:1px solid var(--line-2);
+ color:var(--ink);padding:5px 9px;font-family:var(--mono);font-size:10.5px;outline:none;border-radius:0}
+.single input:focus{border-color:var(--hud-dim);box-shadow:0 0 0 1px rgba(95,217,245,.25)}
+.single input::placeholder{color:var(--muted)}
+.single input:disabled{opacity:.5}
+.single .sbtn{flex:none}
+.sbtn:disabled{opacity:.55;cursor:default}
+.single-err{margin:0;padding:0 2px;font-size:10.5px;color:var(--crit)}
+.single-err.hidden{display:none}
+
+/* ═══ раскрывашка «Технические детали» ═══ */
+.report>h3{cursor:pointer}
+.report>h3:hover{color:#8fe6fb}
+.tcaret{flex:none;margin-left:6px;color:var(--hud-dim);font-family:var(--mono);font-size:9px}
+.report.collapsed{flex:none}
+.report.collapsed .bd,.report.collapsed .tally{display:none}
+/* в одну колонку (узкое окно) собранной раскрывашке высота не нужна */
+@media (max-width:820px){
+  main .pan.report.collapsed{min-height:auto}
+}

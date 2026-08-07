@@ -776,9 +776,24 @@ func checkBlocked(p Prober, withTimeout func() (context.Context, context.CancelF
 	}
 
 	// Ни один адрес не отвечает — дальше мерить нечего, и четыре лишних
-	// таймаута ничего не добавят к уже доказанному.
+	// таймаута ничего не добавят к уже доказанному. Но замер через VPN
+	// сделать обязаны: блокировка по IP — как раз тот случай, когда
+	// человеку важнее всего знать, откроется ли сервис у него сейчас.
+	// Без этого замера вердикт советовал «нужен VPN» тому, у кого VPN
+	// давно включён и всё работает.
 	if liveIP == "" {
 		out.sv = verdict.ServiceVerdict{Host: host, Cause: analyze.Diagnose(ev), ProxyTried: ev.ProxyTried}
+		if proxyURL != nil {
+			ev.ProxyTried = true
+			c, cancel := withTimeout()
+			pr := p.HTTPGet(c, "https://"+host, proxyURL, "")
+			cancel()
+			keep(pr)
+			ev.ProxyOK = pr.Status == probe.StatusOK
+			out.sv.ProxyOK = ev.ProxyOK
+			out.sv.ProxyTried = true
+			out.sv.Cause = analyze.Diagnose(ev)
+		}
 		return out
 	}
 
@@ -899,6 +914,10 @@ func dedupIPs(lists ...[]string) []string {
 	}
 	return out
 }
+
+// FirstProxyURL — то же самое для внешних вызовов: биндинг замера скорости
+// меряет и через VPN, и прокси ему нужен тот же, каким пользуется прогон.
+func FirstProxyURL(s env.Snapshot) *url.URL { return firstProxyURL(s) }
 
 // firstProxyURL — первый активный прокси-листенер как URL для http.Transport.
 func firstProxyURL(s env.Snapshot) *url.URL {
